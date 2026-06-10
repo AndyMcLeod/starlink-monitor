@@ -23,6 +23,12 @@ Connects directly to the dish's local gRPC API — no Starlink app or internet a
 - Per-sector signal quality — 10-segment radial ring chart (color-coded green/yellow/red)
 - Ready states indicator — CADY / SCP / L1L2 / XPHY / AAP
 - Extended info — country code, GPS validity, GPS accuracy, obstruction score, secondary beam, dish ID
+- **Likely satellite estimate (optional)** — a checkbox under the sky compass downloads the
+  public Starlink TLE catalogue from CelesTrak, propagates every satellite with SGP4, and reports
+  whichever currently sits closest to the dish's reported boresight, with the angular offset (Δ).
+  Requires a dish GPS fix (or manually set coordinates) and the optional `sgp4` + `numpy`
+  dependencies. It is a best-guess only — beam handoffs occur every ~15 s and several satellites
+  can share a look-angle. The dish never reveals the satellite's actual name/ID; this is inferred.
 
 **GPS integration**
 - Reads NMEA 0183 sentences from a USB/serial GPS receiver
@@ -36,6 +42,7 @@ Connects directly to the dish's local gRPC API — no Starlink app or internet a
 - Python 3.9+
 - A Starlink dish connected via Ethernet or Wi-Fi (default gateway `192.168.100.1`)
 - Optional: a USB GPS receiver presenting as a serial COM port (NMEA 0183)
+- Optional: `sgp4` + `numpy` for the "Likely satellite" TLE estimate (installed by `requirements.txt`)
 
 ## Installation
 

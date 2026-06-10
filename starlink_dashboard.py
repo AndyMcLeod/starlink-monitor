@@ -6,8 +6,10 @@ Requires: pip install grpcio grpcio-tools pyserial
 
 import os
 import sys
+import csv
 import math
 import time
+import datetime
 import threading
 import subprocess
 import tempfile
@@ -18,11 +20,15 @@ from collections import deque
 from pathlib import Path
 
 DISH_HOST = "192.168.100.1:9200"
-POLL_INTERVAL = 2  # seconds
-HISTORY_LEN = 1200  # points kept for sparklines
+POLL_INTERVAL = 2    # seconds between live polls
+HISTORY_LEN  = 600   # sparkline sample buffer; 600 pts × 2 s = 20 min
+HIST_POINTS  = 600   # throughput history deque; 600 pts × 2 s = 20 min
 
 GPS_PORT = "COM10"
 GPS_BAUD = 9600
+
+# Optional "Likely satellite" TLE matching (detail window). Requires sgp4 + numpy.
+SAT_MATCH_INTERVAL = 15   # seconds between TLE look-angle matches (handoffs are ~15 s)
 
 # ---------------------------------------------------------------------------
 # Proto generation (embedded .proto, compiled at first run)
@@ -128,6 +134,10 @@ message DishGetStatusResponse {
     DishSectorSignal sector_signal = 1028;
 
     DishTilt tilt_quaternion = 1049;
+
+    // Additional fields confirmed by wire-decode (fw 2026.05.26)
+    string router_id = 1040;        // e.g. "Router-01000000000000000092F196"
+    float  dish_timestamp = 1002;   // Unix timestamp from dish clock
 }
 
 message DishGetHistoryResponse {
@@ -206,7 +216,7 @@ class StarlinkClient:
 
 
 # ---------------------------------------------------------------------------
-# Colour palette
+# Colour palette + font scale
 # ---------------------------------------------------------------------------
 
 BG = "#0d1117"
@@ -221,6 +231,35 @@ BLUE = "#58a6ff"
 TEAL = "#39d353"
 ORANGE = "#db6d28"
 PURPLE = "#bc8cff"
+
+F_CARD  = ("Consolas", 12, "bold")   # card title
+F_KEY   = ("Consolas", 11)           # row key labels (dim)
+F_VAL   = ("Consolas", 12)           # row value text
+F_SMALL = ("Consolas", 10)           # secondary labels (GPS status, headers)
+F_TINY  = ("Consolas", 8)            # axis tick labels
+F_BIG   = ("Consolas", 28, "bold")   # metric card main number
+
+
+def copyable_label(parent, var, fg=TEXT, font=None, bg=CARD,
+                   justify="left", width=0):
+    """Read-only Entry styled as a plain label.
+    Supports native text selection and Ctrl+C."""
+    e = tk.Entry(
+        parent,
+        textvariable=var,
+        fg=fg,
+        readonlybackground=bg,
+        font=font or F_VAL,
+        relief="flat", bd=0,
+        highlightthickness=0,
+        state="readonly",
+        cursor="xterm",
+        justify=justify,
+    )
+    if width:
+        e.config(width=width)
+    return e
+
 
 # ---------------------------------------------------------------------------
 # Canvas sparkline widget
@@ -246,11 +285,12 @@ def _nice_ticks(lo, hi, n=3):
 
 class Sparkline(tk.Canvas):
     def __init__(self, parent, maxlen=HISTORY_LEN, color=BLUE, height=56,
-                 unit="", fmt="{:.1f}", **kw):
+                 unit="", fmt="{:.1f}", y_init=None, **kw):
         super().__init__(parent, height=height, bg=CARD, highlightthickness=0, **kw)
         self.color = color
         self.unit = unit
         self.fmt = fmt
+        self.y_init = y_init   # (lo, hi) preset range; used until buffer is full
         self.data: deque = deque(maxlen=maxlen)
         self.bind("<Configure>", lambda _: self._draw())
 
@@ -265,9 +305,17 @@ class Sparkline(tk.Canvas):
         if w < 2 or len(self.data) < 2:
             return
         vals = list(self.data)
-        lo, hi = min(vals), max(vals)
-        if hi == lo:
-            hi = lo + 1
+        # Use preset range until the buffer fills, then auto-scale
+        if self.y_init and len(self.data) < self.data.maxlen:
+            lo, hi = self.y_init
+        else:
+            lo, hi = min(vals), max(vals)
+            # Enforce a minimum visible range so a stable signal (e.g. SNR ≈ 19.2 dB)
+            # doesn't appear as a frozen flat line.
+            min_span = max(abs((lo + hi) / 2) * 0.10, 1.0)
+            if hi - lo < min_span:
+                mid = (lo + hi) / 2
+                lo, hi = mid - min_span / 2, mid + min_span / 2
         ticks = _nice_ticks(lo, hi, n=2)
 
         LMARGIN = 42
@@ -287,7 +335,7 @@ class Sparkline(tk.Canvas):
             y = to_y(tick)
             self.create_line(LMARGIN, y, w - 4, y, fill=BORDER, dash=(2, 4))
             self.create_text(LMARGIN - 4, y, text=self.fmt.format(tick),
-                             fill=DIM, font=("Consolas", 8), anchor="e")
+                             fill=DIM, font=F_TINY, anchor="e")
 
         # Axes
         self.create_line(LMARGIN, TOP, LMARGIN, h - BOTTOM, fill=BORDER)
@@ -304,7 +352,7 @@ class Sparkline(tk.Canvas):
                 label = f"-{int(age_s/60)}m" if age_s > 0 else "now"
             x = LMARGIN + frac * plot_w
             self.create_text(x, h - BOTTOM + 3, text=label, fill=DIM,
-                             font=("Consolas", 7), anchor="n")
+                             font=F_TINY, anchor="n")
 
         # Data line
         xs = [to_x(i, n_pts) for i in range(n_pts)]
@@ -323,7 +371,7 @@ def make_card(parent, title, colspan=1, rowspan=1):
     frame = tk.Frame(parent, bg=CARD, bd=0, highlightthickness=1,
                      highlightbackground=BORDER)
     lbl = tk.Label(frame, text=title.upper(), bg=CARD, fg=TEXT,
-                   font=("Consolas", 11, "bold"), anchor="w", padx=8, pady=6)
+                   font=F_CARD, anchor="w", padx=8, pady=6)
     lbl.pack(fill="x")
     return frame
 
@@ -331,7 +379,8 @@ def make_card(parent, title, colspan=1, rowspan=1):
 class MetricCard:
     """Big number + unit + optional colour threshold + sparkline."""
     def __init__(self, parent, title, unit="", fmt="{:.1f}",
-                 low_good=False, warn=None, crit=None, spark_color=BLUE):
+                 low_good=False, warn=None, crit=None, spark_color=BLUE,
+                 spark_y_init=None):
         self.frame = make_card(parent, title)
         self.unit = unit
         self.fmt = fmt
@@ -341,17 +390,22 @@ class MetricCard:
 
         self.val_var = tk.StringVar(value="--")
         self.val_lbl = tk.Label(self.frame, textvariable=self.val_var,
-                                bg=CARD, fg=TEXT,
-                                font=("Consolas", 26, "bold"),
-                                anchor="center")
+                                bg=CARD, fg=TEXT, font=F_BIG, anchor="center")
         self.val_lbl.pack(fill="x", padx=8)
+        # click-to-copy on the big number
+        def _copy_metric(_, v=self.val_var, w=self.val_lbl):
+            w.clipboard_clear(); w.clipboard_append(v.get())
+            orig = w.cget("fg"); w.config(fg=DIM)
+            w.after(200, lambda: w.config(fg=orig))
+        self.val_lbl.bind("<Button-1>", _copy_metric)
+        self.val_lbl.config(cursor="hand2")
 
         self.unit_lbl = tk.Label(self.frame, text=unit, bg=CARD, fg=TEXT,
-                                 font=("Consolas", 11), anchor="center")
+                                 font=F_VAL, anchor="center")
         self.unit_lbl.pack(fill="x")
 
         self.spark = Sparkline(self.frame, color=spark_color, height=56,
-                               unit=unit, fmt=fmt)
+                               unit=unit, fmt=fmt, y_init=spark_y_init)
         self.spark.pack(fill="x", padx=4, pady=4)
 
     def update(self, value):
@@ -381,38 +435,37 @@ class StatusPanel:
     def __init__(self, parent):
         self.frame = make_card(parent, "Status")
         self.rows = {}
-        for key in ["Obstructed", "Obstruction s", "Ethernet",
+        for key in ["Obstr. Events", "Obstr. Map", "Ethernet",
                     "Elevation", "Azimuth", "SNR", "Uptime", "Firmware"]:
             row = tk.Frame(self.frame, bg=CARD)
-            row.pack(fill="x", padx=8, pady=2)
+            row.pack(fill="x", padx=8, pady=1)
             tk.Label(row, text=f"{key}:", bg=CARD, fg=DIM,
-                     font=("Consolas", 11), width=14, anchor="w").pack(side="left")
+                     font=F_KEY, width=14, anchor="w").pack(side="left")
             var = tk.StringVar(value="--")
-            lbl = tk.Label(row, textvariable=var, bg=CARD, fg=TEXT,
-                           font=("Consolas", 11), anchor="w")
-            lbl.pack(side="left")
-            self.rows[key] = (var, lbl)
+            e = copyable_label(row, var)
+            e.pack(side="left", fill="x", expand=True)
+            self.rows[key] = (var, e)
 
     def set(self, key, value, color=None):
         if key in self.rows:
-            var, lbl = self.rows[key]
+            var, e = self.rows[key]
             var.set(str(value))
             if color:
-                lbl.configure(fg=color)
+                e.configure(fg=color)
 
 
 class InfoPanel:
     def __init__(self, parent):
         self.frame = make_card(parent, "Dish Info")
         self.rows = {}
-        for key in ["ID", "Hardware", "Firmware", "Uptime"]:
+        for key in ["ID", "Hardware", "Firmware", "Uptime", "Usage"]:
             row = tk.Frame(self.frame, bg=CARD)
-            row.pack(fill="x", padx=8, pady=2)
+            row.pack(fill="x", padx=8, pady=1)
             tk.Label(row, text=f"{key}:", bg=CARD, fg=DIM,
-                     font=("Consolas", 11), width=10, anchor="w").pack(side="left")
+                     font=F_KEY, width=10, anchor="w").pack(side="left")
             var = tk.StringVar(value="--")
-            tk.Label(row, textvariable=var, bg=CARD, fg=TEXT,
-                     font=("Consolas", 11), anchor="w").pack(side="left")
+            e = copyable_label(row, var)
+            e.pack(side="left", fill="x", expand=True)
             self.rows[key] = var
 
     def set(self, key, value):
@@ -425,10 +478,10 @@ class StatusBar:
         self.frame = tk.Frame(parent, bg="#0a0f16", height=22)
         self.frame.pack(fill="x", side="bottom")
         self.left = tk.Label(self.frame, bg="#0a0f16", fg=DIM,
-                             font=("Consolas", 10), anchor="w", padx=8)
+                             font=F_SMALL, anchor="w", padx=8)
         self.left.pack(side="left")
         self.right = tk.Label(self.frame, bg="#0a0f16", fg=DIM,
-                              font=("Consolas", 10), anchor="e", padx=8)
+                              font=F_SMALL, anchor="e", padx=8)
         self.right.pack(side="right")
 
     def update(self, ok, msg=""):
@@ -456,50 +509,68 @@ def fetch_geolocation():
 
 class PointingCanvas(tk.Canvas):
     """Draws the dish pointing direction as a dot on a hemisphere projection."""
-    SIZE = 160
+    SIZE = 180      # diameter of the hemisphere area
+    EXTRA = 36      # space below the circle for az/el text
 
     def __init__(self, parent):
-        super().__init__(parent, width=self.SIZE, height=self.SIZE,
+        h = self.SIZE + self.EXTRA
+        super().__init__(parent, width=self.SIZE, height=h,
                          bg=CARD, highlightthickness=0)
-        self._el = None
-        self._az = None
-        self._draw_base()
+        self._draw(None, None, False)
 
-    def _draw_base(self):
+    # Ring elevations and their label text
+    _RINGS = [(30, "30°"), (60, "60°")]
+
+    def _draw(self, el, az, link_degraded):
         self.delete("all")
-        cx = cy = self.SIZE // 2
-        r = cx - 10
-        self.create_oval(cx-r, cy-r, cx+r, cy+r, outline=BORDER, fill="#0d1117")
-        for ring_pct in [0.33, 0.66]:
-            rr = int(r * ring_pct)
-            self.create_oval(cx-rr, cy-rr, cx+rr, cy+rr, outline=BORDER, dash=(2,4))
+        cx = self.SIZE // 2
+        cy = self.SIZE // 2
+        r  = cx - 14          # radius of the 0° (horizon) ring
+
+        # Background circle
+        self.create_oval(cx-r, cy-r, cx+r, cy+r, outline=BORDER, fill=BG)
+
+        # Elevation rings (30° and 60°) with labels
+        for el_deg, el_lbl in self._RINGS:
+            frac = 1.0 - el_deg / 90.0
+            rr = int(r * frac)
+            self.create_oval(cx-rr, cy-rr, cx+rr, cy+rr,
+                             outline=BORDER, dash=(2, 4))
+            self.create_text(cx + rr + 3, cy, text=el_lbl,
+                             fill=DIM, font=F_TINY, anchor="w")
+
+        # Compass spokes and cardinal labels
         for angle in range(0, 360, 45):
             x = cx + r * math.sin(math.radians(angle))
             y = cy - r * math.cos(math.radians(angle))
             self.create_line(cx, cy, x, y, fill=BORDER, dash=(1, 6))
-        self.create_text(cx, cy-r-6, text="N", fill=DIM, font=("Consolas", 7))
-        self.create_text(cx+r+6, cy, text="E", fill=DIM, font=("Consolas", 7))
-        self.create_text(cx, cy, text="No data", fill=DIM, font=("Consolas", 8))
+        self.create_text(cx,     cy-r-8, text="N",  fill=TEXT, font=F_TINY)
+        self.create_text(cx+r+8, cy,     text="E",  fill=DIM,  font=F_TINY)
+        self.create_text(cx,     cy+r+8, text="S",  fill=DIM,  font=F_TINY)
+        self.create_text(cx-r-8, cy,     text="W",  fill=DIM,  font=F_TINY)
 
-    def update(self, elevation_deg, azimuth_deg, obstructed=False):
-        self.delete("all")
-        cx = cy = self.SIZE // 2
-        r = cx - 10
-        self.create_oval(cx-r, cy-r, cx+r, cy+r, outline=BORDER, fill="#0d1117")
-        for ring_pct in [0.33, 0.66]:
-            rr = int(r * ring_pct)
-            self.create_oval(cx-rr, cy-rr, cx+rr, cy+rr, outline=BORDER, dash=(2,4))
-        self.create_text(cx, cy-r-6, text="N", fill=DIM, font=("Consolas", 7))
-        self.create_text(cx+r+6, cy, text="E", fill=DIM, font=("Consolas", 7))
-        # Convert az/el to canvas coords (0° el = edge, 90° el = center)
-        dist = r * (1.0 - elevation_deg / 90.0)
-        x = cx + dist * math.sin(math.radians(azimuth_deg))
-        y = cy - dist * math.cos(math.radians(azimuth_deg))
-        dot_color = RED if obstructed else TEAL
-        self.create_oval(x-8, y-8, x+8, y+8, fill=dot_color, outline="")
-        self.create_text(cx, cy+r+10,
-                         text=f"Az {azimuth_deg:.1f}°  El {elevation_deg:.1f}°",
-                         fill=TEXT, font=("Consolas", 8))
+        if el is None:
+            self.create_text(cx, cy, text="No data", fill=DIM, font=F_TINY)
+        else:
+            # Convert az/el → canvas coords (el 0° = edge, 90° = center)
+            dist = r * (1.0 - el / 90.0)
+            dx = cx + dist * math.sin(math.radians(az))
+            dy = cy - dist * math.cos(math.radians(az))
+            dot_color = RED if link_degraded else TEAL
+            self.create_oval(dx-7, dy-7, dx+7, dy+7, fill=dot_color, outline=BG, width=2)
+
+        # Text area below circle
+        ty = self.SIZE + 10
+        if el is not None:
+            self.create_text(cx, ty,
+                             text=f"Az {az:.1f}°   El {el:.1f}°",
+                             fill=TEXT, font=F_SMALL, anchor="n")
+        else:
+            self.create_text(cx, ty, text="Az --   El --",
+                             fill=DIM, font=F_SMALL, anchor="n")
+
+    def update(self, elevation_deg, azimuth_deg, link_degraded=False):
+        self._draw(elevation_deg, azimuth_deg, link_degraded)
 
 
 # ---------------------------------------------------------------------------
@@ -639,23 +710,221 @@ class DetailInfoPanel:
         self.frame = make_card(parent, "Extended Info")
         self.rows = {}
         keys = ["Country", "GPS Valid", "GPS Accuracy", "Obstruction Score",
-                "Sec. Elevation", "Sec. Azimuth", "Obstr. Events", "Dish ID"]
+                "Sec. Elevation", "Sec. Azimuth", "Obstr. Events", "Likely Sat",
+                "Dish ID", "Router ID", "Dish Clock"]
         for key in keys:
             row = tk.Frame(self.frame, bg=CARD)
-            row.pack(fill="x", padx=8, pady=2)
+            row.pack(fill="x", padx=8, pady=1)
             tk.Label(row, text=f"{key}:", bg=CARD, fg=DIM,
-                     font=("Consolas", 10), width=16, anchor="w").pack(side="left")
+                     font=F_KEY, width=16, anchor="w").pack(side="left")
             var = tk.StringVar(value="--")
-            lbl = tk.Label(row, textvariable=var, bg=CARD, fg=TEXT,
-                           font=("Consolas", 10), anchor="w")
-            lbl.pack(side="left")
-            self.rows[key] = (var, lbl)
+            e = copyable_label(row, var)
+            e.pack(side="left", fill="x", expand=True)
+            self.rows[key] = (var, e)
 
     def set(self, key, value, color=None):
         if key in self.rows:
-            var, lbl = self.rows[key]
+            var, e = self.rows[key]
             var.set(str(value))
-            lbl.configure(fg=color or TEXT)
+            e.configure(fg=color or TEXT)
+
+
+# ---------------------------------------------------------------------------
+# CSV data logger
+# ---------------------------------------------------------------------------
+
+LOG_FIELDS = [
+    "timestamp_utc",
+    "dl_mbps", "ul_mbps", "latency_ms", "drop_pct",
+    "snr_db", "boresight_el_deg", "boresight_az_deg", "tilt_deg",
+    "obstr_events", "eth_mbps", "uptime_s",
+    "dish_gps_valid", "dish_gps_accuracy_m", "obstr_score",
+    "gps_lat", "gps_lon", "gps_sats", "gps_quality",
+    "firmware", "country",
+    "cum_dl_gb", "cum_ul_gb",
+]
+
+
+class DataLogger:
+    """Appends one CSV row per poll. Rotates to a new file at the UTC day boundary."""
+
+    DATA_DIR = Path(__file__).parent / "data"
+
+    def __init__(self):
+        self.DATA_DIR.mkdir(exist_ok=True)
+        self._date = None
+        self._fh   = None
+        self._csv  = None
+
+    def _rotate(self):
+        today = datetime.datetime.now(datetime.timezone.utc).date()
+        if today == self._date and self._fh:
+            return
+        if self._fh:
+            self._fh.close()
+        self._date = today
+        path = self.DATA_DIR / f"starlink_{today.isoformat()}.csv"
+        write_header = not path.exists()
+        self._fh  = open(path, "a", newline="", encoding="utf-8")
+        self._csv = csv.writer(self._fh)
+        if write_header:
+            self._csv.writerow(LOG_FIELDS)
+        self._fh.flush()
+
+    def log(self, row: dict):
+        self._rotate()
+        self._csv.writerow([row.get(f, "") for f in LOG_FIELDS])
+        self._fh.flush()
+
+    def close(self):
+        if self._fh:
+            self._fh.close()
+            self._fh = None
+
+
+# ---------------------------------------------------------------------------
+# Optional "Likely satellite" estimate via TLE look-angle matching
+# ---------------------------------------------------------------------------
+#
+# The local gRPC API never exposes which satellite the dish is talking to, so
+# this is an *estimate*: download the public Starlink TLE catalog from CelesTrak,
+# propagate every satellite with SGP4 to "now", convert each to a topocentric
+# az/el as seen from the dish, and report whichever sits closest to the dish's
+# reported boresight. Beam handoffs happen every ~15 s and several satellites can
+# share a look-angle, so treat the result as a best-guess, not ground truth.
+#
+# Dependencies (sgp4 + numpy) are imported lazily; if missing, the feature stays
+# disabled with a helpful message instead of breaking the dashboard.
+
+class SatelliteMatcher:
+    TLE_URL = ("https://celestrak.org/NORAD/elements/gp.php"
+               "?GROUP=starlink&FORMAT=tle")
+    CACHE   = Path(__file__).parent / "data" / "starlink_tle.txt"
+    REFRESH_H = 8       # re-download TLEs if cache older than this
+    MIN_EL    = 10.0    # ignore satellites below this elevation (deg)
+
+    def __init__(self):
+        self._array = None     # sgp4 SatrecArray
+        self._names = None
+        self._np = None
+
+    # -- public ---------------------------------------------------------
+    def load(self):
+        """Download/refresh the TLE cache and build the propagation array.
+        Returns (ok: bool, message: str). Safe to call from a worker thread."""
+        try:
+            import numpy as np
+            from sgp4.api import Satrec, SatrecArray
+        except ImportError:
+            return False, "needs 'pip install sgp4 numpy'"
+        try:
+            self._refresh_cache()
+        except Exception as e:
+            if not self.CACHE.exists():
+                return False, f"TLE download failed: {e}"
+            # fall back to stale cache rather than failing outright
+        names, recs = [], []
+        lines = [l.rstrip() for l in
+                 self.CACHE.read_text(encoding="utf-8").splitlines() if l.strip()]
+        i = 0
+        while i + 2 < len(lines) + 1 and i + 2 <= len(lines) - 1:
+            name, l1, l2 = lines[i], lines[i + 1], lines[i + 2]
+            if l1.startswith("1 ") and l2.startswith("2 "):
+                try:
+                    recs.append(Satrec.twoline2rv(l1, l2))
+                    names.append(name.strip())
+                except Exception:
+                    pass
+                i += 3
+            else:
+                i += 1
+        if not recs:
+            return False, "no TLEs parsed"
+        self._np = np
+        self._names = names
+        self._array = SatrecArray(recs)
+        return True, f"{len(recs)} satellites"
+
+    def match(self, lat_deg, lon_deg, az_deg, el_deg, alt_m=0.0):
+        """Return (name, separation_deg, sat_az, sat_el) of the closest satellite,
+        or None. Vectorised SGP4 over the whole catalogue (~tens of ms)."""
+        if self._array is None:
+            return None
+        np = self._np
+        from sgp4.api import jday
+        now = datetime.datetime.now(datetime.timezone.utc)
+        jd, fr = jday(now.year, now.month, now.day,
+                      now.hour, now.minute, now.second + now.microsecond * 1e-6)
+        err, r, _v = self._array.sgp4(np.array([jd]), np.array([fr]))
+        r = r[:, 0, :] * 1000.0          # km -> m, TEME frame
+        good = err[:, 0] == 0
+
+        # Rotate TEME -> ECEF about Z by GMST (sub-0.1° accuracy, ample for ~1° matching)
+        theta = self._gmst_rad(jd + fr)
+        cT, sT = math.cos(theta), math.sin(theta)
+        x, y, z = r[:, 0], r[:, 1], r[:, 2]
+        xe = cT * x + sT * y
+        ye = -sT * x + cT * y
+        ze = z
+
+        ox, oy, oz, e_hat, n_hat, u_hat = self._observer_ecef(lat_deg, lon_deg, alt_m)
+        dx, dy, dz = xe - ox, ye - oy, ze - oz
+        E = dx * e_hat[0] + dy * e_hat[1] + dz * e_hat[2]
+        N = dx * n_hat[0] + dy * n_hat[1] + dz * n_hat[2]
+        U = dx * u_hat[0] + dy * u_hat[1] + dz * u_hat[2]
+        el = np.degrees(np.arctan2(U, np.hypot(E, N)))
+        az = np.degrees(np.arctan2(E, N)) % 360.0
+
+        # Angular separation between each satellite and the dish boresight
+        el_b, az_b = math.radians(el_deg), math.radians(az_deg)
+        el_r, az_r = np.radians(el), np.radians(az)
+        cos_sep = (np.sin(el_r) * math.sin(el_b) +
+                   np.cos(el_r) * math.cos(el_b) * np.cos(az_r - az_b))
+        sep = np.degrees(np.arccos(np.clip(cos_sep, -1.0, 1.0)))
+
+        mask = good & (el > self.MIN_EL)
+        if not mask.any():
+            return None
+        sep_masked = np.where(mask, sep, 1e9)
+        idx = int(np.argmin(sep_masked))
+        return (self._names[idx], float(sep[idx]), float(az[idx]), float(el[idx]))
+
+    # -- internals ------------------------------------------------------
+    def _refresh_cache(self):
+        self.CACHE.parent.mkdir(exist_ok=True)
+        if (self.CACHE.exists() and
+                time.time() - self.CACHE.stat().st_mtime < self.REFRESH_H * 3600):
+            return
+        import urllib.request
+        req = urllib.request.Request(
+            self.TLE_URL, headers={"User-Agent": "starlink-dashboard"})
+        data = urllib.request.urlopen(req, timeout=30).read().decode()
+        if len(data) < 100 or "\n1 " not in ("\n" + data):
+            raise RuntimeError("empty/invalid TLE response")
+        self.CACHE.write_text(data, encoding="utf-8")
+
+    @staticmethod
+    def _observer_ecef(lat_deg, lon_deg, h):
+        lat, lon = math.radians(lat_deg), math.radians(lon_deg)
+        a, f = 6378137.0, 1 / 298.257223563
+        e2 = f * (2 - f)
+        sL, cL = math.sin(lat), math.cos(lat)
+        sO, cO = math.sin(lon), math.cos(lon)
+        N = a / math.sqrt(1 - e2 * sL * sL)
+        ox = (N + h) * cL * cO
+        oy = (N + h) * cL * sO
+        oz = (N * (1 - e2) + h) * sL
+        e_hat = (-sO, cO, 0.0)
+        n_hat = (-sL * cO, -sL * sO, cL)
+        u_hat = (cL * cO, cL * sO, sL)
+        return ox, oy, oz, e_hat, n_hat, u_hat
+
+    @staticmethod
+    def _gmst_rad(jd_ut1):
+        T = (jd_ut1 - 2451545.0) / 36525.0
+        sec = (67310.54841 + (876600 * 3600 + 8640184.812866) * T
+               + 0.093104 * T * T - 6.2e-6 * T * T * T)
+        return math.radians((sec % 86400.0) / 240.0 % 360.0)
 
 
 LOCATION_FILE = Path(__file__).parent / "location.json"
@@ -706,7 +975,7 @@ class LocationPanel:
 
         # --- Ground station column ---
         gs_hdr = tk.Label(body, text="Ground Station (IP)", bg=CARD, fg=ORANGE,
-                          font=("Consolas", 9, "bold"), anchor="w")
+                          font=F_SMALL, anchor="w")
         gs_hdr.grid(row=0, column=0, sticky="w", padx=6, pady=(2, 0))
 
         self._gs = {}
@@ -714,12 +983,11 @@ class LocationPanel:
                    ("Region", "gs_region"), ("ISP", "gs_isp"), ("IP", "gs_ip")]
         for r, (label, key) in enumerate(gs_keys, start=1):
             tk.Label(body, text=f"{label}:", bg=CARD, fg=DIM,
-                     font=("Consolas", 10), anchor="w").grid(
+                     font=F_SMALL, anchor="w").grid(
                          row=r, column=0, sticky="w", padx=(10, 2))
             var = tk.StringVar(value="--")
-            tk.Label(body, textvariable=var, bg=CARD, fg=TEXT,
-                     font=("Consolas", 10), anchor="w").grid(
-                         row=r, column=0, sticky="e", padx=(0, 6))
+            e = copyable_label(body, var, font=F_SMALL, justify="right")
+            e.grid(row=r, column=0, sticky="e", padx=(0, 6))
             self._gs[key] = var
 
         # --- Separator ---
@@ -729,67 +997,62 @@ class LocationPanel:
         # --- Dish location column ---
         self._dish_hdr_var = tk.StringVar(value="Dish Location (set)")
         dish_hdr = tk.Label(body, textvariable=self._dish_hdr_var, bg=CARD, fg=TEAL,
-                            font=("Consolas", 9, "bold"), anchor="w")
+                            font=F_SMALL, anchor="w")
         dish_hdr.grid(row=0, column=1, sticky="w", padx=6, pady=(2, 0))
 
         # GPS status row
         self._gps_var = tk.StringVar(value="GPS: --")
         self._gps_label = tk.Label(body, textvariable=self._gps_var, bg=CARD, fg=DIM,
-                                   font=("Consolas", 9), anchor="w")
+                                   font=F_SMALL, anchor="w")
         self._gps_label.grid(row=1, column=1, sticky="w", padx=(10, 2))
 
         self._dish = {}
-        # Lat/Lon row: key on left, value on right (same cell)
+        # Lat/Lon row
         tk.Label(body, text="Lat/Lon:", bg=CARD, fg=DIM,
-                 font=("Consolas", 10), anchor="w").grid(
-                     row=2, column=1, sticky="w", padx=(10, 2))
+                 font=F_SMALL, anchor="w").grid(row=2, column=1, sticky="w", padx=(10, 2))
         _ll_var = tk.StringVar(value="--")
         self._dish["dish_latlon"] = _ll_var
-        tk.Label(body, textvariable=_ll_var, bg=CARD, fg=TEAL,
-                 font=("Consolas", 10), anchor="e").grid(
-                     row=2, column=1, sticky="e", padx=(0, 6))
+        copyable_label(body, _ll_var, fg=TEAL, font=F_SMALL, justify="right").grid(
+            row=2, column=1, sticky="e", padx=(0, 6))
         # Label row
         tk.Label(body, text="Label:", bg=CARD, fg=DIM,
-                 font=("Consolas", 10), anchor="w").grid(
-                     row=3, column=1, sticky="w", padx=(10, 2))
+                 font=F_SMALL, anchor="w").grid(row=3, column=1, sticky="w", padx=(10, 2))
         _lbl_var = tk.StringVar(value="--")
         self._dish["dish_label"] = _lbl_var
-        tk.Label(body, textvariable=_lbl_var, bg=CARD, fg=TEAL,
-                 font=("Consolas", 10), anchor="e").grid(
-                     row=3, column=1, sticky="e", padx=(0, 6))
+        copyable_label(body, _lbl_var, fg=TEAL, font=F_SMALL, justify="right").grid(
+            row=3, column=1, sticky="e", padx=(0, 6))
 
         # Distance row
         tk.Label(body, text="Distance:", bg=CARD, fg=DIM,
-                 font=("Consolas", 10), anchor="w").grid(
-                     row=4, column=1, sticky="w", padx=(10, 2))
+                 font=F_SMALL, anchor="w").grid(row=4, column=1, sticky="w", padx=(10, 2))
         self._dist_var = tk.StringVar(value="--")
-        tk.Label(body, textvariable=self._dist_var, bg=CARD, fg=YELLOW,
-                 font=("Consolas", 10, "bold"), anchor="w").grid(
-                     row=5, column=1, sticky="w", padx=(10, 2))
+        copyable_label(body, self._dist_var, fg=YELLOW,
+                       font=(F_SMALL[0], F_SMALL[1], "bold")).grid(
+            row=5, column=1, sticky="w", padx=(10, 2))
 
         # COM port selector + connect button
         port_frame = tk.Frame(body, bg=CARD)
         port_frame.grid(row=6, column=1, sticky="w", padx=8, pady=(4, 2))
 
         tk.Label(port_frame, text="GPS Port:", bg=CARD, fg=DIM,
-                 font=("Consolas", 9)).pack(side="left")
+                 font=F_SMALL).pack(side="left")
 
         self._port_var = tk.StringVar(value=GPS_PORT)
         self._port_combo = ttk.Combobox(
             port_frame, textvariable=self._port_var,
-            width=8, font=("Consolas", 9), state="readonly")
+            width=8, font=F_SMALL, state="readonly")
         self._port_combo.pack(side="left", padx=(4, 2))
         self._port_combo.bind("<ButtonPress>", self._refresh_ports)
 
         self._connect_btn = tk.Button(
             port_frame, text="Connect", command=self._on_connect_gps,
-            bg=BORDER, fg=TEXT, font=("Consolas", 9),
+            bg=BORDER, fg=TEXT, font=F_SMALL,
             relief="flat", cursor="hand2", padx=6, pady=2)
         self._connect_btn.pack(side="left", padx=2)
 
         # Set Location button (manual override)
         btn = tk.Button(body, text="Set Manual…", command=self._on_set,
-                        bg=BORDER, fg=TEXT, font=("Consolas", 10),
+                        bg=BORDER, fg=TEXT, font=F_SMALL,
                         relief="flat", cursor="hand2", padx=6, pady=3)
         btn.grid(row=7, column=1, sticky="w", padx=8, pady=(0, 6))
 
@@ -989,6 +1252,18 @@ class Dashboard:
         self._build_detail_window()
         self._client = None
         self._error_count = 0
+        self._obstr_event_count = 0
+        self._cum_dl_gb = 0.0   # cumulative download since dashboard start
+        self._cum_ul_gb = 0.0   # cumulative upload since dashboard start
+        self._obstr_last_event_time = None
+        self._last_gps = {}   # latest GPS fix: lat, lon, sats, quality
+        self._logger = DataLogger()
+        # Optional "Likely satellite" TLE matcher (detail window, off by default)
+        self._sat_matcher = SatelliteMatcher()
+        self._sat_on = False           # plain mirror of the tk checkbox (thread-safe read)
+        self._sat_loaded = False
+        self._last_boresight = None    # (el, az) from most recent status
+        self._last_sat_match_t = 0.0
         self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._poll_thread.start()
         threading.Thread(target=self._fetch_location, daemon=True).start()
@@ -1004,6 +1279,62 @@ class Dashboard:
         self.location_panel._port_var.set(saved_port)
         self._reconnect_gps(saved_port)
 
+    # ------------------------------------------------------------------
+    # Optional "Likely satellite" TLE estimate
+    # ------------------------------------------------------------------
+    def _on_toggle_sat(self):
+        self._sat_on = self._sat_enabled.get()
+        if not self._sat_on:
+            self._sat_status_var.set("")
+            self.detail_info.set("Likely Sat", "--", DIM)
+            return
+        if self._sat_loaded:
+            self._sat_status_var.set("Sat: matching…")
+            self._last_sat_match_t = 0.0   # force a match on next poll
+        else:
+            self._sat_status_var.set("Sat: loading TLE catalogue…")
+            threading.Thread(target=self._load_sat_tle, daemon=True).start()
+
+    def _load_sat_tle(self):
+        ok, msg = self._sat_matcher.load()
+        self._sat_loaded = ok
+        self._last_sat_match_t = 0.0
+        self.root.after(0, self._sat_status_var.set,
+                        f"TLE: {msg}" if ok else f"Sat unavailable — {msg}")
+
+    def _maybe_match_satellite(self):
+        """Runs in the poll thread. Throttled, vectorised, never blocks the UI."""
+        if not (self._sat_on and self._sat_loaded):
+            return
+        if time.time() - self._last_sat_match_t < SAT_MATCH_INTERVAL:
+            return
+        bs = self._last_boresight
+        lat = self.location_panel._dish_lat
+        lon = self.location_panel._dish_lon
+        if bs is None or lat is None or lon is None:
+            self.root.after(0, self._show_sat_match, None, "need GPS fix + pointing")
+            return
+        self._last_sat_match_t = time.time()
+        try:
+            res = self._sat_matcher.match(lat, lon, bs[1], bs[0])
+        except Exception as e:
+            self.root.after(0, self._show_sat_match, None, str(e)[:40])
+            return
+        self.root.after(0, self._show_sat_match, res, None)
+
+    def _show_sat_match(self, res, err):
+        if err:
+            self.detail_info.set("Likely Sat", "--", DIM)
+            self._sat_status_var.set(f"Sat: {err}")
+            return
+        if not res:
+            self.detail_info.set("Likely Sat", "no sat above horizon", DIM)
+            return
+        name, sep, _saz, _sel = res
+        color = GREEN if sep < 3 else (YELLOW if sep < 8 else ORANGE)
+        self.detail_info.set("Likely Sat", f"{name}  (Δ{sep:.1f}°)", color)
+        self._sat_status_var.set(f"Sat: nearest of catalogue, Δ{sep:.1f}° from boresight")
+
     def _reconnect_gps(self, port):
         save_gps_port(port)
         if self._gps_reader is not None:
@@ -1012,8 +1343,15 @@ class Dashboard:
         self.location_panel.set_gps_connecting(port)
 
     def _on_gps_update(self, lat, lon, quality, num_sats):
+        if lat is not None and quality > 0:
+            self._last_gps = {"lat": lat, "lon": lon,
+                              "sats": num_sats, "quality": quality}
         self.root.after(0, self.location_panel.set_gps_status,
                         lat, lon, quality, num_sats)
+
+    def _on_close(self):
+        self._logger.close()
+        self.root.destroy()
 
     # ------------------------------------------------------------------
     def _build_ui(self):
@@ -1067,12 +1405,12 @@ class Dashboard:
         self.status_panel.frame.grid(row=1, column=3, sticky="nsew", padx=4, pady=4)
 
         # Row 2 — throughput history chart
-        hist_frame = make_card(main, "Throughput History  (last 1200 s / 20 min)")
+        hist_frame = make_card(main, "Throughput History  (last 20 min)")
         hist_frame.grid(row=2, column=0, columnspan=4, sticky="nsew", padx=4, pady=4)
         self.hist_canvas = tk.Canvas(hist_frame, bg=CARD, highlightthickness=0, height=100)
         self.hist_canvas.pack(fill="both", expand=True, padx=6, pady=4)
-        self._dl_history: deque = deque(maxlen=HISTORY_LEN)
-        self._ul_history: deque = deque(maxlen=HISTORY_LEN)
+        self._dl_history: deque = deque(maxlen=HIST_POINTS)
+        self._ul_history: deque = deque(maxlen=HIST_POINTS)
         self.hist_canvas.bind("<Configure>", lambda _: self._draw_history())
 
     def _build_detail_window(self):
@@ -1102,6 +1440,19 @@ class Dashboard:
         sky_frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
         self.pointing_canvas = PointingCanvas(sky_frame)
         self.pointing_canvas.pack(expand=True, pady=4)
+
+        # Optional "Likely satellite" TLE estimate (off by default)
+        self._sat_enabled = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            sky_frame, text="Estimate satellite (TLE)",
+            variable=self._sat_enabled, command=self._on_toggle_sat,
+            bg=CARD, fg=DIM, selectcolor=BG, activebackground=CARD,
+            activeforeground=TEXT, font=F_SMALL, bd=0, highlightthickness=0,
+            cursor="hand2", anchor="w").pack(fill="x", padx=8)
+        self._sat_status_var = tk.StringVar(value="")
+        tk.Label(sky_frame, textvariable=self._sat_status_var, bg=CARD, fg=DIM,
+                 font=F_TINY, wraplength=190, justify="left",
+                 anchor="w").pack(fill="x", padx=8, pady=(0, 4))
 
         # Dish tilt gauge
         tilt_frame = make_card(main, "Dish Tilt")
@@ -1214,6 +1565,7 @@ class Dashboard:
                     self.root.after(0, self._seed_history, hist)
                 status = self._client.get_status()
                 self.root.after(0, self._apply_status, status)
+                self._maybe_match_satellite()
                 self._error_count = 0
             except Exception as e:
                 self._error_count += 1
@@ -1238,8 +1590,11 @@ class Dashboard:
         for v in ul:   self.card_ul.spark.push(v)
         for v in snr:  self.card_snr.spark.push(v)
 
-        self._dl_history.extend(dl)
-        self._ul_history.extend(ul)
+        # Seeded data is 1 Hz; live polls are every POLL_INTERVAL seconds.
+        # Downsample so each stored point represents the same time step as live data,
+        # keeping the X-axis scale consistent and the 20-min window accurate.
+        self._dl_history.extend(dl[::POLL_INTERVAL])
+        self._ul_history.extend(ul[::POLL_INTERVAL])
         self._draw_history()
 
     def _apply_status(self, s):
@@ -1248,8 +1603,7 @@ class Dashboard:
         snr = s.signal_stats.snr_db
         el = s.boresight_elevation_deg
         az = s.boresight_azimuth_deg
-        obstructed = s.obstruction_stats.currently_obstructed
-
+        self._last_boresight = (el, az)   # consumed by optional TLE sat matcher
         # Main window metrics
         self.card_latency.update(s.pop_ping_latency_ms)
         self.card_drop.update(s.pop_ping_drop_rate * 100)
@@ -1265,10 +1619,49 @@ class Dashboard:
         self.info_panel.set("Hardware", di.hardware_version)
         self.info_panel.set("Firmware", di.software_version)
         self.info_panel.set("Uptime", f"{uptime_h}h {uptime_m}m")
+        self._cum_dl_gb += dl * POLL_INTERVAL / 8 / 1e3  # Mbps × s → MB → GB
+        self._cum_ul_gb += ul * POLL_INTERVAL / 8 / 1e3
+        cum_total = self._cum_dl_gb + self._cum_ul_gb
+        if cum_total < 1.0:
+            usage_str = f"↓{self._cum_dl_gb*1e3:.0f} ↑{self._cum_ul_gb*1e3:.0f} MB"
+        else:
+            usage_str = f"↓{self._cum_dl_gb:.2f} ↑{self._cum_ul_gb:.2f} GB"
+        self.info_panel.set("Usage", usage_str)
 
-        obstr_color = RED if obstructed else GREEN
-        self.status_panel.set("Obstructed", "YES" if obstructed else "No", obstr_color)
-        self.status_panel.set("Obstruction s", s.obstruction_stats.obstruction_duration_s)
+        # currently_obstructed reflects learned sky-map state in fw 2026.05.26,
+        # not real-time signal loss — show cumulative events with age, hide if >12 h old
+        obstr_events = s.obstruction_stats.obstruction_event_count
+        if obstr_events > self._obstr_event_count:
+            self._obstr_last_event_time = time.time()
+            self._obstr_event_count = obstr_events
+        elif self._obstr_last_event_time is None and obstr_events > 0:
+            self._obstr_last_event_time = time.time()
+            self._obstr_event_count = obstr_events
+
+        age_s = (time.time() - self._obstr_last_event_time
+                 if self._obstr_last_event_time else None)
+        STALE = 43200  # 12 hours
+
+        if obstr_events == 0:
+            self.status_panel.set("Obstr. Events", "None", GREEN)
+            self.status_panel.set("Obstr. Map", "--", DIM)
+        elif age_s is not None and age_s > STALE:
+            self.status_panel.set("Obstr. Events", "None recent", GREEN)
+            self.status_panel.set("Obstr. Map", "--", DIM)
+        else:
+            if age_s is None:
+                age_str = "this session"
+            elif age_s < 60:
+                age_str = f"{int(age_s)}s ago"
+            elif age_s < 3600:
+                age_str = f"{int(age_s/60)}m ago"
+            else:
+                age_str = f"{int(age_s/3600)}h {int(age_s%3600/60)}m ago"
+            evt_color = YELLOW if obstr_events < 5 else RED
+            self.status_panel.set("Obstr. Events",
+                                  f"{obstr_events}  ({age_str})", evt_color)
+            self.status_panel.set("Obstr. Map",
+                                  f"last seen {age_str}", DIM)
         self.status_panel.set("Ethernet", f"{s.eth_speed_mbps} Mbps")
         self.status_panel.set("Elevation", f"{el:.1f}°")
         self.status_panel.set("Azimuth", f"{az:.1f}°")
@@ -1280,8 +1673,10 @@ class Dashboard:
         self._ul_history.append(ul)
         self._draw_history()
 
-        # Detail window updates
-        self.pointing_canvas.update(el, az, obstructed)
+        # Use packet loss as the real-time signal-quality indicator for the sky dot
+        # (currently_obstructed reflects the learned map in fw 2026.05.26, not live loss)
+        link_degraded = s.pop_ping_drop_rate > 0.01  # >1% loss = red dot
+        self.pointing_canvas.update(el, az, link_degraded)
 
         # Dish tilt from orientation quaternion (fields: x=1, w=2, y=3, z=4)
         q = s.tilt_quaternion
@@ -1310,12 +1705,52 @@ class Dashboard:
         self.detail_info.set("Sec. Azimuth",   f"{s.signal_stats.secondary_azimuth_deg:.1f}°")
         self.detail_info.set("Obstr. Events",  s.obstruction_stats.obstruction_event_count)
         self.detail_info.set("Dish ID", di.id)
+        if s.router_id:
+            self.detail_info.set("Router ID", s.router_id)
+        if s.dish_timestamp > 0:
+            dt = datetime.datetime.fromtimestamp(s.dish_timestamp, tz=datetime.timezone.utc)
+            self.detail_info.set("Dish Clock", dt.strftime("%Y-%m-%d %H:%M:%S UTC"))
 
         self.status_bar.update(True,
             f"dl {dl:.1f} Mbps  ul {ul:.1f} Mbps  "
             f"latency {s.pop_ping_latency_ms:.0f} ms  "
             f"loss {s.pop_ping_drop_rate*100:.2f}%  "
             f"SNR {snr:.1f} dB")
+
+        # --- Data logging ---
+        q = s.tilt_quaternion
+        w2, x2, y2, z2 = q.w, q.x, q.y, q.z
+        tilt_log = ""
+        if abs(w2) > 0.01 or abs(x2) > 0.01:
+            rz = w2*w2 - x2*x2 - y2*y2 + z2*z2
+            tilt_log = f"{math.degrees(math.acos(max(-1.0, min(1.0, rz)))):.2f}"
+        gps = self._last_gps
+        self._logger.log({
+            "timestamp_utc":       datetime.datetime.now(datetime.timezone.utc)
+                                   .strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "dl_mbps":             f"{dl:.3f}",
+            "ul_mbps":             f"{ul:.3f}",
+            "latency_ms":          f"{s.pop_ping_latency_ms:.1f}",
+            "drop_pct":            f"{s.pop_ping_drop_rate * 100:.4f}",
+            "snr_db":              f"{snr:.2f}",
+            "boresight_el_deg":    f"{el:.2f}",
+            "boresight_az_deg":    f"{az:.2f}",
+            "tilt_deg":            tilt_log,
+            "obstr_events":        obstr_events,
+            "eth_mbps":            s.eth_speed_mbps,
+            "uptime_s":            s.device_state.uptime_s,
+            "dish_gps_valid":      1 if s.gps_status.valid else 0,
+            "dish_gps_accuracy_m": f"{s.gps_status.accuracy:.2f}",
+            "obstr_score":         f"{s.signal_stats.obstruction_score:.4f}",
+            "gps_lat":             f"{gps['lat']:.6f}" if gps.get("lat") else "",
+            "gps_lon":             f"{gps['lon']:.6f}" if gps.get("lon") else "",
+            "gps_sats":            gps.get("sats", ""),
+            "gps_quality":         gps.get("quality", ""),
+            "firmware":            di.software_version,
+            "country":             di.country_code,
+            "cum_dl_gb":           f"{self._cum_dl_gb:.6f}",
+            "cum_ul_gb":           f"{self._cum_ul_gb:.6f}",
+        })
 
     def _draw_history(self):
         c = self.hist_canvas
@@ -1349,7 +1784,7 @@ class Dashboard:
             y = to_y(tick)
             c.create_line(LMARGIN, y, w - 6, y, fill=BORDER, dash=(2, 4))
             c.create_text(LMARGIN - 4, y, text=f"{tick:.1f}",
-                          fill=TEXT, font=("Consolas", 9), anchor="e")
+                          fill=TEXT, font=F_TINY, anchor="e")
 
         # Axes
         c.create_line(LMARGIN, TOP, LMARGIN, h - BOTTOM, fill=BORDER)
@@ -1357,11 +1792,12 @@ class Dashboard:
 
         # "Mbps" axis title
         c.create_text(LMARGIN - 4, TOP - 6, text="Mbps",
-                      fill=DIM, font=("Consolas", 9), anchor="e")
+                      fill=DIM, font=F_TINY, anchor="e")
 
-        # X-axis time labels
+        # X-axis time labels — each stored point is POLL_INTERVAL seconds apart;
+        # cap at HIST_POINTS * POLL_INTERVAL so the scale never exceeds 20 min.
         n_pts = max(len(self._dl_history), len(self._ul_history))
-        total_s = n_pts * POLL_INTERVAL
+        total_s = min(n_pts * POLL_INTERVAL, HIST_POINTS * POLL_INTERVAL)
         for frac, anchor in ((0.0, "w"), (0.25, "center"), (0.5, "center"),
                               (0.75, "center"), (1.0, "e")):
             age_s = total_s * (1.0 - frac)
@@ -1374,7 +1810,7 @@ class Dashboard:
             x = LMARGIN + frac * plot_w
             c.create_line(x, h - BOTTOM, x, h - BOTTOM + 3, fill=BORDER)
             c.create_text(x, h - BOTTOM + 5, text=label, fill=TEXT,
-                          font=("Consolas", 9), anchor="n")
+                          font=F_TINY, anchor="n")
 
         def draw_series(data, color):
             if len(data) < 2:
@@ -1427,6 +1863,7 @@ def main():
     root.after(50, _apply_dark_titlebar)
 
     app = Dashboard(root)
+    root.protocol("WM_DELETE_WINDOW", app._on_close)
     root.mainloop()
 
 

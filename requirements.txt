@@ -1,3 +1,7 @@
 grpcio>=1.60.0
 grpcio-tools>=1.60.0
 pyserial>=3.5
+
+# Optional — only needed for the detail window's "Likely satellite" TLE estimate
+sgp4>=2.21
+numpy>=1.21

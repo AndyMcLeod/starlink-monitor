@@ -1,6 +1,13 @@
 # User config — contains personal coordinates and GPS port preference
 location.json
 
+# Starlink service-account OAuth credentials (client_id / secret) — NEVER commit
+starlink_credentials.json
+.env
+
+# Telemetry logs
+data/
+
 # Python
 __pycache__/
 *.py[cod]
