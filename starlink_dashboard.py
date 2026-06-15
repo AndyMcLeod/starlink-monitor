@@ -1914,6 +1914,19 @@ class Dashboard:
         c.create_text(lx + 104, 11, text="Upload", fill=TEXT,
                       font=("Consolas", 9), anchor="w")
 
+        # Mean over the displayed window (right-aligned, color-matched to the lines)
+        if self._dl_history or self._ul_history:
+            dl_mean = (sum(self._dl_history) / len(self._dl_history)
+                       if self._dl_history else 0.0)
+            ul_mean = (sum(self._ul_history) / len(self._ul_history)
+                       if self._ul_history else 0.0)
+            c.create_text(w - 6, 11, text=f"↑ {ul_mean:.1f} Mbps", fill=PURPLE,
+                          font=("Consolas", 9, "bold"), anchor="e")
+            c.create_text(w - 92, 11, text=f"↓ {dl_mean:.1f}", fill=BLUE,
+                          font=("Consolas", 9, "bold"), anchor="e")
+            c.create_text(w - 150, 11, text="avg:", fill=DIM,
+                          font=("Consolas", 9), anchor="e")
+
 
 # ---------------------------------------------------------------------------
 # Entry point
