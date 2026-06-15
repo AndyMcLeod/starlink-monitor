@@ -232,12 +232,80 @@ TEAL = "#39d353"
 ORANGE = "#db6d28"
 PURPLE = "#bc8cff"
 
-F_CARD  = ("Consolas", 12, "bold")   # card title
-F_KEY   = ("Consolas", 11)           # row key labels (dim)
-F_VAL   = ("Consolas", 12)           # row value text
-F_SMALL = ("Consolas", 10)           # secondary labels (GPS status, headers)
-F_TINY  = ("Consolas", 8)            # axis tick labels
-F_BIG   = ("Consolas", 28, "bold")   # metric card main number
+# ---------------------------------------------------------------------------
+# Fonts — named tkfont.Font objects so they can be rescaled live with the window.
+# Until init_fonts() runs (needs a Tk root) these are plain tuples, which are
+# still valid anywhere a font is accepted; init_fonts() swaps in Font objects and
+# attach_font_scaling() resizes them on <Configure>. Updating one Font object
+# restyles every widget that uses it, so the whole UI scales together.
+# ---------------------------------------------------------------------------
+_FONT_SPECS = {              # name: (family, base_size, weight)
+    "F_CARD":       ("Consolas", 12, "bold"),    # card title
+    "F_KEY":        ("Consolas", 11, "normal"),  # row key labels (dim)
+    "F_VAL":        ("Consolas", 12, "normal"),  # row value text
+    "F_SMALL":      ("Consolas", 10, "normal"),  # secondary labels
+    "F_TINY":       ("Consolas",  8, "normal"),  # axis tick labels
+    "F_BIG":        ("Consolas", 28, "bold"),    # metric card main number
+    "F_SMALL_BOLD": ("Consolas", 10, "bold"),    # emphasised secondary labels
+    "F_TITLE":      ("Consolas", 14, "bold"),    # window header banners
+}
+_FONT_OBJS = {}   # name -> tkfont.Font (populated by init_fonts)
+_FONT_BASE = {}   # name -> base point size
+
+# Tuple placeholders so references resolve before init_fonts() swaps in Font objects.
+F_CARD       = _FONT_SPECS["F_CARD"]
+F_KEY        = _FONT_SPECS["F_KEY"]
+F_VAL        = _FONT_SPECS["F_VAL"]
+F_SMALL      = _FONT_SPECS["F_SMALL"]
+F_TINY       = _FONT_SPECS["F_TINY"]
+F_BIG        = _FONT_SPECS["F_BIG"]
+F_SMALL_BOLD = _FONT_SPECS["F_SMALL_BOLD"]
+F_TITLE      = _FONT_SPECS["F_TITLE"]
+
+
+def init_fonts(root):
+    """Create the named Font objects once a Tk root exists, replacing the
+    tuple placeholders in module globals."""
+    g = globals()
+    for name, (family, size, weight) in _FONT_SPECS.items():
+        f = tkfont.Font(root=root, family=family, size=size, weight=weight)
+        _FONT_OBJS[name] = f
+        _FONT_BASE[name] = size
+        g[name] = f
+
+
+class FontScaler:
+    """Maps window size to a clamped scale factor and resizes all named fonts."""
+    def __init__(self, lo=0.80, hi=1.55):
+        self.lo, self.hi = lo, hi
+        self._last = None
+
+    def apply(self, w, h, base_w, base_h):
+        if w <= 1 or h <= 1:
+            return
+        scale = max(self.lo, min(self.hi, min(w / base_w, h / base_h)))
+        q = round(scale, 2)
+        if q == self._last:
+            return
+        self._last = q
+        for name, f in _FONT_OBJS.items():
+            f.configure(size=max(6, int(round(_FONT_BASE[name] * q))))
+
+
+def attach_font_scaling(window, scaler, base_w, base_h):
+    """Rescale fonts (debounced) whenever this top-level window is resized."""
+    state = {"job": None}
+
+    def _on_configure(e):
+        if e.widget is not window:
+            return            # ignore child-widget configure events
+        if state["job"] is not None:
+            window.after_cancel(state["job"])
+        state["job"] = window.after(
+            60, lambda: scaler.apply(window.winfo_width(),
+                                     window.winfo_height(), base_w, base_h))
+
+    window.bind("<Configure>", _on_configure, add="+")
 
 
 def copyable_label(parent, var, fg=TEXT, font=None, bg=CARD,
@@ -709,7 +777,7 @@ class DetailInfoPanel:
     def __init__(self, parent):
         self.frame = make_card(parent, "Extended Info")
         self.rows = {}
-        keys = ["Country", "GPS Valid", "GPS Accuracy", "Obstruction Score",
+        keys = ["Country", "GPS Valid", "GPS Accuracy", "Obstr. Score",
                 "Sec. Elevation", "Sec. Azimuth", "Obstr. Events", "Likely Sat",
                 "Dish ID", "Router ID", "Dish Clock"]
         for key in keys:
@@ -970,11 +1038,12 @@ class LocationPanel:
 
         body = tk.Frame(self.frame, bg=CARD)
         body.pack(fill="both", expand=True, padx=4, pady=2)
-        body.columnconfigure(0, weight=1)
-        body.columnconfigure(1, weight=1)
+        # Equal, fixed-share columns so neither side can grow into the other.
+        body.columnconfigure(0, weight=1, uniform="loc")
+        body.columnconfigure(1, weight=1, uniform="loc")
 
         # --- Ground station column ---
-        gs_hdr = tk.Label(body, text="Ground Station (IP)", bg=CARD, fg=ORANGE,
+        gs_hdr = tk.Label(body, text="Ground (IP)", bg=CARD, fg=ORANGE,
                           font=F_SMALL, anchor="w")
         gs_hdr.grid(row=0, column=0, sticky="w", padx=6, pady=(2, 0))
 
@@ -986,16 +1055,18 @@ class LocationPanel:
                      font=F_SMALL, anchor="w").grid(
                          row=r, column=0, sticky="w", padx=(10, 2))
             var = tk.StringVar(value="--")
-            e = copyable_label(body, var, font=F_SMALL, justify="right")
+            # width-bounded so long values (ISP, IP) clip inside the cell and
+            # scroll/copy rather than spilling over the divider into the dish column
+            e = copyable_label(body, var, font=F_SMALL, justify="right", width=11)
             e.grid(row=r, column=0, sticky="e", padx=(0, 6))
             self._gs[key] = var
 
-        # --- Separator ---
+        # --- Separator (only spans the two data columns, not the full-width controls) ---
         tk.Frame(body, bg=BORDER, width=1).grid(
-            row=0, column=0, rowspan=8, sticky="nse", padx=2)
+            row=0, column=0, rowspan=6, sticky="nse", padx=2)
 
         # --- Dish location column ---
-        self._dish_hdr_var = tk.StringVar(value="Dish Location (set)")
+        self._dish_hdr_var = tk.StringVar(value="Dish (set)")
         dish_hdr = tk.Label(body, textvariable=self._dish_hdr_var, bg=CARD, fg=TEAL,
                             font=F_SMALL, anchor="w")
         dish_hdr.grid(row=0, column=1, sticky="w", padx=6, pady=(2, 0))
@@ -1012,27 +1083,28 @@ class LocationPanel:
                  font=F_SMALL, anchor="w").grid(row=2, column=1, sticky="w", padx=(10, 2))
         _ll_var = tk.StringVar(value="--")
         self._dish["dish_latlon"] = _ll_var
-        copyable_label(body, _ll_var, fg=TEAL, font=F_SMALL, justify="right").grid(
-            row=2, column=1, sticky="e", padx=(0, 6))
+        copyable_label(body, _ll_var, fg=TEAL, font=F_SMALL, justify="right",
+                       width=12).grid(row=2, column=1, sticky="e", padx=(0, 6))
         # Label row
         tk.Label(body, text="Label:", bg=CARD, fg=DIM,
                  font=F_SMALL, anchor="w").grid(row=3, column=1, sticky="w", padx=(10, 2))
         _lbl_var = tk.StringVar(value="--")
         self._dish["dish_label"] = _lbl_var
-        copyable_label(body, _lbl_var, fg=TEAL, font=F_SMALL, justify="right").grid(
-            row=3, column=1, sticky="e", padx=(0, 6))
+        copyable_label(body, _lbl_var, fg=TEAL, font=F_SMALL, justify="right",
+                       width=12).grid(row=3, column=1, sticky="e", padx=(0, 6))
 
         # Distance row
         tk.Label(body, text="Distance:", bg=CARD, fg=DIM,
                  font=F_SMALL, anchor="w").grid(row=4, column=1, sticky="w", padx=(10, 2))
         self._dist_var = tk.StringVar(value="--")
         copyable_label(body, self._dist_var, fg=YELLOW,
-                       font=(F_SMALL[0], F_SMALL[1], "bold")).grid(
+                       font=F_SMALL_BOLD).grid(
             row=5, column=1, sticky="w", padx=(10, 2))
 
-        # COM port selector + connect button
+        # GPS port selector + buttons span the FULL panel width (both columns)
+        # so the controls have room and never clip against the narrow columns.
         port_frame = tk.Frame(body, bg=CARD)
-        port_frame.grid(row=6, column=1, sticky="w", padx=8, pady=(4, 2))
+        port_frame.grid(row=6, column=0, columnspan=2, sticky="w", padx=8, pady=(5, 1))
 
         tk.Label(port_frame, text="GPS Port:", bg=CARD, fg=DIM,
                  font=F_SMALL).pack(side="left")
@@ -1040,21 +1112,20 @@ class LocationPanel:
         self._port_var = tk.StringVar(value=GPS_PORT)
         self._port_combo = ttk.Combobox(
             port_frame, textvariable=self._port_var,
-            width=8, font=F_SMALL, state="readonly")
-        self._port_combo.pack(side="left", padx=(4, 2))
+            width=7, font=F_SMALL, state="readonly")
+        self._port_combo.pack(side="left", padx=(4, 0))
         self._port_combo.bind("<ButtonPress>", self._refresh_ports)
 
+        btn_frame = tk.Frame(body, bg=CARD)
+        btn_frame.grid(row=7, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
         self._connect_btn = tk.Button(
-            port_frame, text="Connect", command=self._on_connect_gps,
+            btn_frame, text="Connect GPS", command=self._on_connect_gps,
             bg=BORDER, fg=TEXT, font=F_SMALL,
             relief="flat", cursor="hand2", padx=6, pady=2)
-        self._connect_btn.pack(side="left", padx=2)
-
-        # Set Location button (manual override)
-        btn = tk.Button(body, text="Set Manual…", command=self._on_set,
-                        bg=BORDER, fg=TEXT, font=F_SMALL,
-                        relief="flat", cursor="hand2", padx=6, pady=3)
-        btn.grid(row=7, column=1, sticky="w", padx=8, pady=(0, 6))
+        self._connect_btn.pack(side="left", padx=(0, 5))
+        tk.Button(btn_frame, text="Set Manual…", command=self._on_set,
+                  bg=BORDER, fg=TEXT, font=F_SMALL,
+                  relief="flat", cursor="hand2", padx=6, pady=2).pack(side="left")
 
         self._gs_lat = None
         self._gs_lon = None
@@ -1111,7 +1182,7 @@ class LocationPanel:
         else:
             self._gps_var.set(f"GPS: Fixed{sats_txt}")
             self._gps_label.config(fg=GREEN)
-            self._dish_hdr_var.set("Dish Location (GPS)")
+            self._dish_hdr_var.set("Dish (GPS)")
             self.set_dish_location(lat, lon, "GPS Fix")
 
     def set_dish_location(self, lat, lon, label=""):
@@ -1248,8 +1319,13 @@ class Dashboard:
         root.geometry("1200x760")
         root.minsize(1000, 640)
 
+        init_fonts(root)             # create scalable named fonts before any widgets
         self._build_ui()
         self._build_detail_window()
+        # Live font scaling: rescale text as either window is resized (clamped range)
+        self._font_scaler = FontScaler()
+        attach_font_scaling(root, self._font_scaler, 1200, 760)
+        attach_font_scaling(self._detail, self._font_scaler, 900, 680)
         self._client = None
         self._error_count = 0
         self._obstr_event_count = 0
@@ -1356,7 +1432,7 @@ class Dashboard:
     # ------------------------------------------------------------------
     def _build_ui(self):
         title = tk.Label(self.root, text="  STARLINK  DISH  MONITOR",
-                         bg=BG, fg=BLUE, font=("Consolas", 14, "bold"),
+                         bg=BG, fg=BLUE, font=F_TITLE,
                          anchor="w", pady=8, padx=12)
         title.pack(fill="x")
         tk.Frame(self.root, bg=BORDER, height=1).pack(fill="x")
@@ -1425,7 +1501,7 @@ class Dashboard:
                                lambda: self._detail.withdraw())
 
         title = tk.Label(self._detail, text="  STARLINK  DETAIL  VIEW",
-                         bg=BG, fg=PURPLE, font=("Consolas", 14, "bold"),
+                         bg=BG, fg=PURPLE, font=F_TITLE,
                          anchor="w", pady=8, padx=12)
         title.pack(fill="x")
         tk.Frame(self._detail, bg=BORDER, height=1).pack(fill="x")
@@ -1700,7 +1776,7 @@ class Dashboard:
         self.detail_info.set("GPS Accuracy", f"{gps_acc:.2f} m", acc_color)
         obs_score = s.signal_stats.obstruction_score
         obs_color = GREEN if obs_score < 0.2 else (YELLOW if obs_score < 0.5 else RED)
-        self.detail_info.set("Obstruction Score", f"{obs_score:.3f}", obs_color)
+        self.detail_info.set("Obstr. Score", f"{obs_score:.3f}", obs_color)
         self.detail_info.set("Sec. Elevation", f"{s.signal_stats.secondary_elevation_deg:.1f}°")
         self.detail_info.set("Sec. Azimuth",   f"{s.signal_stats.secondary_azimuth_deg:.1f}°")
         self.detail_info.set("Obstr. Events",  s.obstruction_stats.obstruction_event_count)
