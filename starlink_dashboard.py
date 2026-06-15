@@ -23,6 +23,7 @@ DISH_HOST = "192.168.100.1:9200"
 POLL_INTERVAL = 2    # seconds between live polls
 HISTORY_LEN  = 600   # sparkline sample buffer; 600 pts × 2 s = 20 min
 HIST_POINTS  = 600   # throughput history deque; 600 pts × 2 s = 20 min
+BOXCAR_N     = 100   # throughput mean = moving boxcar over the last 100 samples
 
 GPS_PORT = "COM10"
 GPS_BAUD = 9600
@@ -1494,7 +1495,7 @@ class Dashboard:
         self._avg_ul_var = tk.StringVar(value="↑ -- Mbps")
         avg_hdr = tk.Frame(hist_frame, bg=CARD)
         avg_hdr.place(relx=1.0, x=-10, y=4, anchor="ne")
-        tk.Label(avg_hdr, text="20-min avg:", bg=CARD, fg=DIM,
+        tk.Label(avg_hdr, text=f"{BOXCAR_N}-sample avg:", bg=CARD, fg=DIM,
                  font=F_SMALL).pack(side="left")
         copyable_label(avg_hdr, self._avg_dl_var, fg=BLUE, font=F_VAL,
                        width=8).pack(side="left", padx=(4, 4))
@@ -1936,12 +1937,12 @@ class Dashboard:
         c.create_text(lx + 104, 11, text="Upload", fill=TEXT,
                       font=("Consolas", 9), anchor="w")
 
-        # Mean over the displayed window -> copyable labels in the panel header
+        # Moving boxcar mean over the most recent BOXCAR_N samples
         if self._dl_history or self._ul_history:
-            dl_mean = (sum(self._dl_history) / len(self._dl_history)
-                       if self._dl_history else 0.0)
-            ul_mean = (sum(self._ul_history) / len(self._ul_history)
-                       if self._ul_history else 0.0)
+            dl_box = list(self._dl_history)[-BOXCAR_N:]
+            ul_box = list(self._ul_history)[-BOXCAR_N:]
+            dl_mean = sum(dl_box) / len(dl_box) if dl_box else 0.0
+            ul_mean = sum(ul_box) / len(ul_box) if ul_box else 0.0
             self._avg_dl_var.set(f"↓ {dl_mean:.1f}")
             self._avg_ul_var.set(f"↑ {ul_mean:.1f} Mbps")
 
