@@ -1055,9 +1055,9 @@ class LocationPanel:
                      font=F_SMALL, anchor="w").grid(
                          row=r, column=0, sticky="w", padx=(10, 2))
             var = tk.StringVar(value="--")
-            # width-bounded so long values (ISP, IP) clip inside the cell and
-            # scroll/copy rather than spilling over the divider into the dish column
-            e = copyable_label(body, var, font=F_SMALL, justify="right", width=11)
+            # width-bounded so long values still clip-and-scroll rather than
+            # spilling over the divider; the wide two-column panel fits full values
+            e = copyable_label(body, var, font=F_SMALL, justify="right", width=18)
             e.grid(row=r, column=0, sticky="e", padx=(0, 6))
             self._gs[key] = var
 
@@ -1084,21 +1084,21 @@ class LocationPanel:
         _ll_var = tk.StringVar(value="--")
         self._dish["dish_latlon"] = _ll_var
         copyable_label(body, _ll_var, fg=TEAL, font=F_SMALL, justify="right",
-                       width=12).grid(row=2, column=1, sticky="e", padx=(0, 6))
+                       width=18).grid(row=2, column=1, sticky="e", padx=(0, 6))
         # Label row
         tk.Label(body, text="Label:", bg=CARD, fg=DIM,
                  font=F_SMALL, anchor="w").grid(row=3, column=1, sticky="w", padx=(10, 2))
         _lbl_var = tk.StringVar(value="--")
         self._dish["dish_label"] = _lbl_var
         copyable_label(body, _lbl_var, fg=TEAL, font=F_SMALL, justify="right",
-                       width=12).grid(row=3, column=1, sticky="e", padx=(0, 6))
+                       width=18).grid(row=3, column=1, sticky="e", padx=(0, 6))
 
         # Distance row
         tk.Label(body, text="Distance:", bg=CARD, fg=DIM,
                  font=F_SMALL, anchor="w").grid(row=4, column=1, sticky="w", padx=(10, 2))
         self._dist_var = tk.StringVar(value="--")
         copyable_label(body, self._dist_var, fg=YELLOW,
-                       font=F_SMALL_BOLD).grid(
+                       font=F_SMALL_BOLD, width=24).grid(
             row=5, column=1, sticky="w", padx=(10, 2))
 
         # GPS port selector + buttons span the FULL panel width (both columns)
@@ -1465,17 +1465,16 @@ class Dashboard:
             spark_color=PURPLE)
         self.card_ul.frame.grid(row=0, column=3, sticky="nsew", padx=4, pady=4)
 
-        # Row 1 — SNR, dish info, location, status
+        # Row 1 — SNR, location (wide), status.  Dish Info now lives in the
+        # detail window, so Location spans two columns and shows full values.
         self.card_snr = MetricCard(
             main, "SNR", unit="dB", fmt="{:.1f}",
             spark_color=GREEN)
         self.card_snr.frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
 
-        self.info_panel = InfoPanel(main)
-        self.info_panel.frame.grid(row=1, column=1, sticky="nsew", padx=4, pady=4)
-
         self.location_panel = LocationPanel(main, self._open_set_location)
-        self.location_panel.frame.grid(row=1, column=2, sticky="nsew", padx=4, pady=4)
+        self.location_panel.frame.grid(row=1, column=1, columnspan=2,
+                                       sticky="nsew", padx=4, pady=4)
 
         self.status_panel = StatusPanel(main)
         self.status_panel.frame.grid(row=1, column=3, sticky="nsew", padx=4, pady=4)
@@ -1540,11 +1539,15 @@ class Dashboard:
         self.ready_panel = ReadyStatesPanel(main)
         self.ready_panel.frame.grid(row=0, column=2, sticky="nsew", padx=4, pady=4)
 
-        # Sector signal ring chart (spans 2 cols)
+        # Sector signal ring chart
         sector_frame = make_card(main, "Per-Sector Signal Quality")
-        sector_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=4, pady=4)
+        sector_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
         self.sector_chart = SectorChart(sector_frame)
         self.sector_chart.pack(expand=True)
+
+        # Dish info (moved from main window)
+        self.info_panel = InfoPanel(main)
+        self.info_panel.frame.grid(row=1, column=1, sticky="nsew", padx=4, pady=4)
 
         # Extended info
         self.detail_info = DetailInfoPanel(main)
