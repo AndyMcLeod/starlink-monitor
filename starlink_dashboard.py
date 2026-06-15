@@ -1134,6 +1134,18 @@ class LocationPanel:
                   bg=BORDER, fg=TEXT, font=F_SMALL,
                   relief="flat", cursor="hand2", padx=6, pady=2).pack(side="left")
 
+        # Live NMEA feed — raw serial sentences, 5 visible lines, auto-scrolling
+        tk.Label(body, text="NMEA feed:", bg=CARD, fg=DIM, font=F_SMALL,
+                 anchor="w").grid(row=8, column=0, columnspan=2,
+                                  sticky="w", padx=8, pady=(2, 0))
+        self._nmea_text = tk.Text(
+            body, height=5, bg=BG, fg=TEAL, font=F_TINY, wrap="none",
+            relief="flat", bd=0, highlightthickness=1, highlightbackground=BORDER,
+            state="disabled", cursor="xterm")
+        self._nmea_text.grid(row=9, column=0, columnspan=2, sticky="nsew",
+                             padx=8, pady=(0, 6))
+        body.rowconfigure(9, weight=1)
+
         self._gs_lat = None
         self._gs_lon = None
         self._dish_lat = None
@@ -1168,6 +1180,17 @@ class LocationPanel:
     def set_gps_connecting(self, port):
         self._gps_var.set(f"GPS: connecting {port}…")
         self._gps_label.config(fg=DIM)
+
+    def append_nmea(self, line):
+        """Append one raw NMEA sentence to the feed box and auto-scroll (UI thread)."""
+        t = self._nmea_text
+        t.config(state="normal")
+        t.insert("end", line + "\n")
+        # cap the buffer so it cannot grow without bound
+        if int(t.index("end-1c").split(".")[0]) > 200:
+            t.delete("1.0", "2.0")
+        t.see("end")
+        t.config(state="disabled")
 
     def set_gps_status(self, lat, lon, quality, num_sats):
         """Called via root.after from the GPS reader thread."""
@@ -1235,8 +1258,9 @@ def _nmea_to_deg(value, hemi):
 class GpsReader:
     """Background thread that reads NMEA sentences from a serial port and parses position."""
 
-    def __init__(self, port, baud, on_update):
+    def __init__(self, port, baud, on_update, on_raw=None):
         self._on_update = on_update  # callable(lat_or_None, lon_or_None, quality, num_sats)
+        self._on_raw = on_raw        # callable(raw_nmea_line) for the live feed display
         self._stop = threading.Event()
         self._sats_in_view = 0   # accumulated from GSV sentences
         self._thread = threading.Thread(
@@ -1260,6 +1284,8 @@ class GpsReader:
                         try:
                             raw = ser.readline()
                             line = raw.decode("ascii", errors="ignore").strip()
+                            if self._on_raw and line.startswith("$"):
+                                self._on_raw(line)
                             self._parse(line)
                         except Exception:
                             pass
@@ -1323,8 +1349,8 @@ class Dashboard:
         self.root = root
         root.title("Starlink Monitor")
         root.configure(bg=BG)
-        root.geometry("1200x760")
-        root.minsize(1000, 640)
+        root.geometry("1200x820")
+        root.minsize(1000, 700)
 
         init_fonts(root)             # create scalable named fonts before any widgets
         self._build_ui()
@@ -1422,7 +1448,8 @@ class Dashboard:
         save_gps_port(port)
         if self._gps_reader is not None:
             self._gps_reader.stop()
-        self._gps_reader = GpsReader(port, GPS_BAUD, self._on_gps_update)
+        self._gps_reader = GpsReader(port, GPS_BAUD, self._on_gps_update,
+                                     on_raw=self._on_gps_raw)
         self.location_panel.set_gps_connecting(port)
 
     def _on_gps_update(self, lat, lon, quality, num_sats):
@@ -1431,6 +1458,10 @@ class Dashboard:
                               "sats": num_sats, "quality": quality}
         self.root.after(0, self.location_panel.set_gps_status,
                         lat, lon, quality, num_sats)
+
+    def _on_gps_raw(self, line):
+        # Called from the GPS thread for each NMEA sentence; marshal to the UI thread.
+        self.root.after(0, self.location_panel.append_nmea, line)
 
     def _on_close(self):
         self._logger.close()
@@ -1449,7 +1480,11 @@ class Dashboard:
         main = tk.Frame(self.root, bg=BG)
         main.pack(fill="both", expand=True, padx=10, pady=8)
         main.columnconfigure((0, 1, 2, 3), weight=1, uniform="col")
-        main.rowconfigure((0, 1, 2), weight=1, uniform="row")
+        # Row 1 (Location with its NMEA feed) needs more height than the
+        # metric/history rows, so it gets extra weight instead of equal sizing.
+        main.rowconfigure(0, weight=3)
+        main.rowconfigure(1, weight=4)
+        main.rowconfigure(2, weight=3)
 
         # Row 0 — throughput + latency metrics
         self.card_latency = MetricCard(
