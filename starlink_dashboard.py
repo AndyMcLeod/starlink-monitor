@@ -63,7 +63,11 @@ message DishSignalStats {
     float elevation_deg = 4;
     float azimuth_deg = 5;
     uint32 rx_beam_state = 6;
-    float obstruction_score = 7;
+    // f7 was mapped to "obstruction_score" but it is an alignment/uncertainty
+    // metric, not an obstruction fraction: it swings (e.g. 0.62 -> 0.44 between
+    // polls) and reads high even with a verified clear sky. Kept for raw logging
+    // only; not surfaced in the UI as obstruction.
+    float align_metric = 7;
     float secondary_elevation_deg = 8;
     float secondary_azimuth_deg = 9;
 }
@@ -148,7 +152,9 @@ message DishGetHistoryResponse {
     repeated float pop_ping_latency_ms = 1002 [packed=true];
     repeated float downlink_throughput_bps = 1003 [packed=true];
     repeated float uplink_throughput_bps = 1004 [packed=true];
-    repeated float snr_db = 1010 [packed=true];
+    // NOTE: field 1010 was previously mapped to snr_db, but wire-decoding showed
+    // it ranges ~16-89 (mean ~32) and does not track the live signal_stats.snr_db
+    // (~16 dB). It is NOT SNR, so it is intentionally not parsed/seeded.
 }
 
 message GetStatusRequest {}
@@ -777,7 +783,7 @@ class DetailInfoPanel:
     def __init__(self, parent):
         self.frame = make_card(parent, "Extended Info")
         self.rows = {}
-        keys = ["Country", "GPS Valid", "GPS Accuracy", "Obstr. Score",
+        keys = ["Country", "GPS Valid", "GPS Accuracy",
                 "Sec. Elevation", "Sec. Azimuth", "Obstr. Events", "Likely Sat",
                 "Dish ID", "Router ID", "Dish Clock"]
         for key in keys:
@@ -806,7 +812,7 @@ LOG_FIELDS = [
     "dl_mbps", "ul_mbps", "latency_ms", "drop_pct",
     "snr_db", "boresight_el_deg", "boresight_az_deg", "tilt_deg",
     "obstr_events", "eth_mbps", "uptime_s",
-    "dish_gps_valid", "dish_gps_accuracy_m", "obstr_score",
+    "dish_gps_valid", "dish_gps_accuracy_m", "align_metric_f7",
     "gps_lat", "gps_lon", "gps_sats", "gps_quality",
     "firmware", "country",
     "cum_dl_gb", "cum_ul_gb",
@@ -1669,18 +1675,22 @@ class Dashboard:
             time.sleep(POLL_INTERVAL)
 
     def _seed_history(self, h):
-        """Pre-populate sparklines from the dish's onboard 900-second history buffer."""
+        """Pre-populate sparklines from the dish's onboard 900-second history buffer.
+
+        Note: SNR is deliberately NOT seeded. The history array at field 1010 does
+        not match the live signal_stats.snr_db (it ranges ~16-89, mean ~32 vs a live
+        ~16 dB), so it is not the SNR metric. Rather than show wrong buffered values,
+        the SNR sparkline builds up from live polls only.
+        """
         dl  = [v / 1e6 for v in h.downlink_throughput_bps]
         ul  = [v / 1e6 for v in h.uplink_throughput_bps]
         lat = list(h.pop_ping_latency_ms)
         drop = [v * 100 for v in h.pop_ping_drop_rate]
-        snr  = list(h.snr_db)
 
         for v in lat:  self.card_latency.spark.push(v)
         for v in drop: self.card_drop.spark.push(v)
         for v in dl:   self.card_dl.spark.push(v)
         for v in ul:   self.card_ul.spark.push(v)
-        for v in snr:  self.card_snr.spark.push(v)
 
         # Seeded data is 1 Hz; live polls are every POLL_INTERVAL seconds.
         # Downsample so each stored point represents the same time step as live data,
@@ -1790,9 +1800,8 @@ class Dashboard:
         gps_acc = s.gps_status.accuracy
         acc_color = GREEN if gps_acc < 5 else (YELLOW if gps_acc < 20 else RED)
         self.detail_info.set("GPS Accuracy", f"{gps_acc:.2f} m", acc_color)
-        obs_score = s.signal_stats.obstruction_score
-        obs_color = GREEN if obs_score < 0.2 else (YELLOW if obs_score < 0.5 else RED)
-        self.detail_info.set("Obstr. Score", f"{obs_score:.3f}", obs_color)
+        # (Obstruction is reported via event count below; the old "Obstr. Score"
+        #  used signal_stats f7, which is an alignment metric, not obstruction.)
         self.detail_info.set("Sec. Elevation", f"{s.signal_stats.secondary_elevation_deg:.1f}°")
         self.detail_info.set("Sec. Azimuth",   f"{s.signal_stats.secondary_azimuth_deg:.1f}°")
         self.detail_info.set("Obstr. Events",  s.obstruction_stats.obstruction_event_count)
@@ -1833,7 +1842,7 @@ class Dashboard:
             "uptime_s":            s.device_state.uptime_s,
             "dish_gps_valid":      1 if s.gps_status.valid else 0,
             "dish_gps_accuracy_m": f"{s.gps_status.accuracy:.2f}",
-            "obstr_score":         f"{s.signal_stats.obstruction_score:.4f}",
+            "align_metric_f7":     f"{s.signal_stats.align_metric:.4f}",
             "gps_lat":             f"{gps['lat']:.6f}" if gps.get("lat") else "",
             "gps_lon":             f"{gps['lon']:.6f}" if gps.get("lon") else "",
             "gps_sats":            gps.get("sats", ""),
