@@ -758,25 +758,44 @@ class SectorChart(tk.Canvas):
 
 
 class ReadyStatesPanel:
+    # (attr, acronym, plain-language description). These are the dish's internal,
+    # undocumented subsystem bring-up flags; descriptions are best-effort.
+    _FLAGS = [
+        ("cady", "CADY",  "Modem (Cady ASIC)"),
+        ("scp",  "SCP",   "System control proc."),
+        ("l1l2", "L1/L2", "Link layers 1 & 2"),
+        ("xphy", "XPHY",  "PHY / RF subsystem"),
+        ("aap",  "AAP",   "App / access layer"),
+    ]
+
     def __init__(self, parent):
         self.frame = make_card(parent, "Ready States")
-        self._flags = [("cady", "CADY"), ("scp", "SCP"), ("l1l2", "L1/L2"),
-                       ("xphy", "XPHY"), ("aap", "AAP")]
-        self._labels = {}
-        row = tk.Frame(self.frame, bg=CARD)
-        row.pack(fill="x", padx=8, pady=6)
-        for attr, name in self._flags:
-            col = tk.Frame(row, bg=CARD)
-            col.pack(side="left", expand=True)
-            dot = tk.Label(col, text="●", bg=CARD, fg=DIM, font=("Consolas", 14))
-            dot.pack()
-            tk.Label(col, text=name, bg=CARD, fg=DIM, font=("Consolas", 8)).pack()
-            self._labels[attr] = dot
+        tk.Label(self.frame,
+                 text="Dish subsystem bring-up — all green = fully operational",
+                 bg=CARD, fg=DIM, font=F_TINY, anchor="w",
+                 wraplength=260, justify="left").pack(fill="x", padx=8, pady=(0, 4))
+        self._rows = {}
+        for attr, acro, desc in self._FLAGS:
+            row = tk.Frame(self.frame, bg=CARD)
+            row.pack(fill="x", padx=8, pady=1)
+            dot = tk.Label(row, text="●", bg=CARD, fg=DIM, font=F_VAL)
+            dot.pack(side="left")
+            tk.Label(row, text=acro, bg=CARD, fg=TEXT, font=F_SMALL_BOLD,
+                     width=6, anchor="w").pack(side="left", padx=(4, 2))
+            tk.Label(row, text=desc, bg=CARD, fg=DIM, font=F_SMALL,
+                     anchor="w").pack(side="left")
+            status = tk.Label(row, text="--", bg=CARD, fg=DIM,
+                              font=F_SMALL, anchor="e")
+            status.pack(side="right")
+            self._rows[attr] = (dot, status)
 
     def update(self, ready_states_msg):
-        for attr, _ in self._flags:
+        for attr, _, _ in self._FLAGS:
             ok = getattr(ready_states_msg, attr, False)
-            self._labels[attr].configure(fg=GREEN if ok else RED)
+            dot, status = self._rows[attr]
+            dot.configure(fg=GREEN if ok else RED)
+            status.configure(text="Ready" if ok else "Down",
+                             fg=GREEN if ok else RED)
 
 
 class DetailInfoPanel:
