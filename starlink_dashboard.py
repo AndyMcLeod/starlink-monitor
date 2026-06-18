@@ -20,6 +20,12 @@ from collections import deque
 from pathlib import Path
 
 DISH_HOST = "192.168.100.1:9200"
+
+# Firmware the protobuf field numbers were reverse-engineered/verified against.
+# On a mismatch the dashboard keeps running but flags it in the Dish Info panel,
+# since a different firmware could shift field numbers and skew readings.
+KNOWN_FIRMWARE = "2026.05.26.mr80668"
+
 POLL_INTERVAL = 2    # seconds between live polls
 HISTORY_LEN  = 600   # sparkline sample buffer; 600 pts × 2 s = 20 min
 HIST_POINTS  = 600   # throughput history deque; 600 pts × 2 s = 20 min
@@ -533,6 +539,7 @@ class InfoPanel:
     def __init__(self, parent):
         self.frame = make_card(parent, "Dish Info")
         self.rows = {}
+        self._entries = {}
         for key in ["ID", "Hardware", "Firmware", "Uptime", "Usage"]:
             row = tk.Frame(self.frame, bg=CARD)
             row.pack(fill="x", padx=8, pady=1)
@@ -542,10 +549,29 @@ class InfoPanel:
             e = copyable_label(row, var)
             e.pack(side="left", fill="x", expand=True)
             self.rows[key] = var
+            self._entries[key] = e
+        # Firmware-mismatch alert — empty (hidden) until a mismatch is seen
+        self._fw_alert_var = tk.StringVar(value="")
+        tk.Label(self.frame, textvariable=self._fw_alert_var, bg=CARD, fg=YELLOW,
+                 font=F_TINY, anchor="w", wraplength=250,
+                 justify="left").pack(fill="x", padx=8, pady=(2, 4))
 
     def set(self, key, value):
         if key in self.rows:
             self.rows[key].set(str(value))
+
+    def set_firmware(self, version, known):
+        """Set the firmware value and flag a mismatch against the verified build."""
+        self.rows["Firmware"].set(version or "--")
+        if version == known:
+            self._entries["Firmware"].configure(fg=GREEN)
+            self._fw_alert_var.set("")
+        else:
+            self._entries["Firmware"].configure(fg=ORANGE)
+            self._fw_alert_var.set(
+                f"⚠ Firmware differs from verified {known}. "
+                "Readings may be inaccurate if field numbers changed; "
+                "dashboard continues running.")
 
 
 class StatusBar:
@@ -1774,7 +1800,7 @@ class Dashboard:
         uptime_m = (ds.uptime_s % 3600) // 60
         self.info_panel.set("ID", di.id)
         self.info_panel.set("Hardware", di.hardware_version)
-        self.info_panel.set("Firmware", di.software_version)
+        self.info_panel.set_firmware(di.software_version, KNOWN_FIRMWARE)
         self.info_panel.set("Uptime", f"{uptime_h}h {uptime_m}m")
         self._cum_dl_gb += dl * POLL_INTERVAL / 8 / 1e3  # Mbps × s → MB → GB
         self._cum_ul_gb += ul * POLL_INTERVAL / 8 / 1e3

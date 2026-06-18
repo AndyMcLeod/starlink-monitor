@@ -138,6 +138,29 @@ The selected GPS port and any manually-entered dish coordinates are saved to
   in-view count. A fix auto-populates the dish coordinates.
 - **IP geolocation** (via `ip-api.com`) resolves to the Starlink ground
   station / PoP, not the dish's physical location — this is expected.
+- **Firmware check.** On the first poll the dish's reported firmware is compared
+  against `KNOWN_FIRMWARE` (the build the field numbers were verified against). On
+  a match the Dish Info panel shows the version in green; on a mismatch it turns
+  orange with a warning that readings may be off — **the dashboard keeps running**.
+
+## Updating for a new firmware
+
+If the orange firmware warning appears, the field numbers *may* have shifted.
+The fastest way to re-verify and adapt:
+
+1. **Trust, then verify.** Most firmware bumps don't move field numbers — first
+   just check whether the live values still look sane (throughput, SNR, pointing).
+   If they do, simply bump `KNOWN_FIRMWARE` to the new build to clear the warning.
+2. **If values look wrong, wire-decode the response.** Call `get_status`, run
+   `response.dish_get_status.SerializeToString()`, and walk the protobuf
+   wire format (field number, wire type, raw bytes) to see which field carries
+   which value — `float` fields are 32-bit (wire type 5), sub-messages are
+   length-delimited (wire type 2). This is exactly how the current mappings were
+   found; a ~40-line decoder is enough.
+3. **Edit one place.** All field numbers live in the `PROTO_SRC` string near the
+   top of `starlink_dashboard.py`. Change the offending field number(s) there —
+   the proto is recompiled at runtime on next launch, so there is no build step.
+4. **Re-validate** against the dish and update `KNOWN_FIRMWARE`.
 
 ---
 
