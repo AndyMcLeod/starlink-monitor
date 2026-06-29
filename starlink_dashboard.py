@@ -24,7 +24,8 @@ DISH_HOST = "192.168.100.1:9200"
 # Firmware the protobuf field numbers were reverse-engineered/verified against.
 # On a mismatch the dashboard keeps running but flags it in the Dish Info panel,
 # since a different firmware could shift field numbers and skew readings.
-KNOWN_FIRMWARE = "2026.05.26.mr80668"
+# Field mappings confirmed unchanged on 2026.06.15.mr81291 (re-verified by wire-decode).
+KNOWN_FIRMWARE = "2026.06.15.mr81291"
 
 POLL_INTERVAL = 2    # seconds between live polls
 HISTORY_LEN  = 600   # sparkline sample buffer; 600 pts × 2 s = 20 min

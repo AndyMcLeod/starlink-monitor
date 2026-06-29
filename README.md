@@ -124,8 +124,8 @@ The selected GPS port and any manually-entered dish coordinates are saved to
   with `grpcio-tools` into a temp directory — so updating a field number is a
   one-line edit, no build step.
 - **Field numbers** were reverse-engineered by raw wire-decoding against firmware
-  **2026.05.26**; most telemetry fields sit ≈ `+1000` from the legacy
-  community-documented spec.
+  **2026.05.26** and confirmed unchanged on **2026.06.15**; most telemetry fields
+  sit ≈ `+1000` from the legacy community-documented spec.
 - **Verified field-mapping corrections** (from wire captures on this firmware):
   - The history array at field `1010` is **not** SNR (it ranges ~16–89, mean ~32),
     so the SNR sparkline is built from live polls only rather than seeded with it.
