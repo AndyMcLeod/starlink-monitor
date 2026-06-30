@@ -773,7 +773,7 @@ class SectorChart(tk.Canvas):
         if not values:
             self.create_text(cx, cy, text="No Data", fill=DIM, font=("Consolas", 9))
         else:
-            self.create_text(cx, cy - 8, text="Signal",
+            self.create_text(cx, cy - 8, text="Map",
                              fill=TEXT, font=("Consolas", 9, "bold"))
             self.create_text(cx, cy + 8, text="per sector",
                              fill=DIM, font=("Consolas", 8))
@@ -864,6 +864,9 @@ LOG_FIELDS = [
     "firmware", "country",
     "cum_dl_gb", "cum_ul_gb",
     "likely_sat", "likely_sat_sep_deg",
+    # Per-sector map values (field 1028) — logged to study long-term behaviour
+    "sector1", "sector2", "sector3", "sector4", "sector5",
+    "sector6", "sector7", "sector8", "sector9", "sector10",
 ]
 
 
@@ -1666,9 +1669,14 @@ class Dashboard:
         self.ready_panel = ReadyStatesPanel(main)
         self.ready_panel.frame.grid(row=0, column=2, sticky="nsew", padx=4, pady=4)
 
-        # Sector signal ring chart
-        sector_frame = make_card(main, "Per-Sector Signal Quality")
+        # Per-sector map (field 1028 updates slowly — like the sky/obstruction map,
+        # it shifts over ~hours as the dish re-scans, not poll-to-poll)
+        sector_frame = make_card(main, "Per-Sector Map")
         sector_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+        tk.Label(sector_frame,
+                 text="Slowly-updating sky scan — changes over hours, not seconds",
+                 bg=CARD, fg=DIM, font=F_TINY, anchor="w",
+                 wraplength=260, justify="left").pack(fill="x", padx=8, pady=(0, 2))
         self.sector_chart = SectorChart(sector_frame)
         self.sector_chart.pack(expand=True)
 
@@ -1961,6 +1969,8 @@ class Dashboard:
             "cum_ul_gb":           f"{self._cum_ul_gb:.6f}",
             "likely_sat":          self._last_sat_name,
             "likely_sat_sep_deg":  self._last_sat_sep,
+            **{f"sector{i}": getattr(s.sector_signal, f"s{i}", "")
+               for i in range(1, 11)},
         })
 
     def _draw_history(self):

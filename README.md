@@ -33,7 +33,8 @@ optional "likely satellite" estimate:
 **Detail window**
 - Sky-position compass — boresight azimuth/elevation on a hemisphere
 - Dish-tilt gauge — tilt from vertical, derived from the onboard orientation quaternion
-- Per-sector signal quality — 10-segment radial ring chart
+- Per-sector map — 10-segment radial ring chart of the dish's per-sector sky
+  scan (field 1028); a slowly-updating map that shifts over hours, not seconds
 - Ready-states indicator — each dish subsystem bring-up flag (CADY, SCP, L1/L2,
   XPHY, AAP) shown with a status dot, a plain-language description, and a
   Ready/Down label (all green = fully operational)
@@ -51,7 +52,8 @@ optional "likely satellite" estimate:
 **Data logging**
 - Every poll is appended to a CSV in `data/`, one file per UTC day
   (`data/starlink_YYYY-MM-DD.csv`), covering throughput, latency, loss, SNR,
-  pointing, tilt, obstruction events, GPS, the likely-satellite match, and more.
+  pointing, tilt, obstruction events, GPS, the likely-satellite match, the 10
+  per-sector map values (for long-term study), and more.
 
 ---
 
