@@ -31,17 +31,23 @@ optional "likely satellite" estimate:
 - Window text scales with window size; resize freely
 
 **Detail window**
-- Sky-position compass — boresight azimuth/elevation on a hemisphere
-- Dish-tilt gauge — tilt from vertical, derived from the onboard orientation quaternion
+- **Satellite sky map** — a top-down, dish-centred map (coastlines + state/country
+  borders + lat/lon grid) that plots every Starlink satellite's sub-point, moving
+  in real time as they're re-propagated each poll. The likely satellite is
+  highlighted with a line to the dish and its boresight offset; a 100-mile
+  reference ring is drawn and the view auto-fits to keep the likely sat visible.
+  (Borders come from a one-time cached Natural Earth GeoJSON; falls back to a grid
+  if offline.)
 - Per-sector map — 10-segment radial ring chart of the dish's per-sector sky
   scan (field 1028); a slowly-updating map that shifts over hours, not seconds
 - Ready-states indicator — each dish subsystem bring-up flag (CADY, SCP, L1/L2,
   XPHY, AAP) shown with a status dot, a plain-language description, and a
   Ready/Down label (all green = fully operational)
-- Dish info — hardware/firmware version, uptime, cumulative session data usage
+- Dish info — hardware/firmware version, uptime, cumulative session data usage,
+  and dish tilt from vertical (moved here from the old gauge)
 - Extended info — country, GPS validity/accuracy, secondary beam, IDs, dish clock
-- **Likely satellite estimate** — *on by default* (toggle via the checkbox under
-  the sky compass). Downloads the public Starlink TLE catalogue from CelesTrak,
+- **Likely satellite estimate** — *on by default* (toggle via the checkbox in the
+  Satellite Sky Map panel). Downloads the public Starlink TLE catalogue from CelesTrak,
   propagates every satellite with SGP4, and reports whichever currently sits
   closest to the dish's reported boresight, with the angular offset (Δ). Needs a
   dish GPS fix (or manual coordinates) plus the `sgp4` + `numpy` packages; if

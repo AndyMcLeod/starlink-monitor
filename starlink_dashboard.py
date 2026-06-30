@@ -541,7 +541,7 @@ class InfoPanel:
         self.frame = make_card(parent, "Dish Info")
         self.rows = {}
         self._entries = {}
-        for key in ["ID", "Hardware", "Firmware", "Uptime", "Usage"]:
+        for key in ["ID", "Hardware", "Firmware", "Uptime", "Usage", "Tilt"]:
             row = tk.Frame(self.frame, bg=CARD)
             row.pack(fill="x", padx=8, pady=1)
             tk.Label(row, text=f"{key}:", bg=CARD, fg=DIM,
@@ -603,120 +603,6 @@ def fetch_geolocation():
     import urllib.request, json
     with urllib.request.urlopen("http://ip-api.com/json?fields=lat,lon,city,regionName,country,isp,query", timeout=6) as r:
         return json.loads(r.read())
-
-
-# ---------------------------------------------------------------------------
-# Pointing / sky position canvas
-# ---------------------------------------------------------------------------
-
-class PointingCanvas(tk.Canvas):
-    """Draws the dish pointing direction as a dot on a hemisphere projection."""
-    SIZE = 180      # diameter of the hemisphere area
-    EXTRA = 36      # space below the circle for az/el text
-
-    def __init__(self, parent):
-        h = self.SIZE + self.EXTRA
-        super().__init__(parent, width=self.SIZE, height=h,
-                         bg=CARD, highlightthickness=0)
-        self._draw(None, None, False)
-
-    # Ring elevations and their label text
-    _RINGS = [(30, "30°"), (60, "60°")]
-
-    def _draw(self, el, az, link_degraded):
-        self.delete("all")
-        cx = self.SIZE // 2
-        cy = self.SIZE // 2
-        r  = cx - 14          # radius of the 0° (horizon) ring
-
-        # Background circle
-        self.create_oval(cx-r, cy-r, cx+r, cy+r, outline=BORDER, fill=BG)
-
-        # Elevation rings (30° and 60°) with labels
-        for el_deg, el_lbl in self._RINGS:
-            frac = 1.0 - el_deg / 90.0
-            rr = int(r * frac)
-            self.create_oval(cx-rr, cy-rr, cx+rr, cy+rr,
-                             outline=BORDER, dash=(2, 4))
-            self.create_text(cx + rr + 3, cy, text=el_lbl,
-                             fill=DIM, font=F_TINY, anchor="w")
-
-        # Compass spokes and cardinal labels
-        for angle in range(0, 360, 45):
-            x = cx + r * math.sin(math.radians(angle))
-            y = cy - r * math.cos(math.radians(angle))
-            self.create_line(cx, cy, x, y, fill=BORDER, dash=(1, 6))
-        self.create_text(cx,     cy-r-8, text="N",  fill=TEXT, font=F_TINY)
-        self.create_text(cx+r+8, cy,     text="E",  fill=DIM,  font=F_TINY)
-        self.create_text(cx,     cy+r+8, text="S",  fill=DIM,  font=F_TINY)
-        self.create_text(cx-r-8, cy,     text="W",  fill=DIM,  font=F_TINY)
-
-        if el is None:
-            self.create_text(cx, cy, text="No data", fill=DIM, font=F_TINY)
-        else:
-            # Convert az/el → canvas coords (el 0° = edge, 90° = center)
-            dist = r * (1.0 - el / 90.0)
-            dx = cx + dist * math.sin(math.radians(az))
-            dy = cy - dist * math.cos(math.radians(az))
-            dot_color = RED if link_degraded else TEAL
-            self.create_oval(dx-7, dy-7, dx+7, dy+7, fill=dot_color, outline=BG, width=2)
-
-        # Text area below circle
-        ty = self.SIZE + 10
-        if el is not None:
-            self.create_text(cx, ty,
-                             text=f"Az {az:.1f}°   El {el:.1f}°",
-                             fill=TEXT, font=F_SMALL, anchor="n")
-        else:
-            self.create_text(cx, ty, text="Az --   El --",
-                             fill=DIM, font=F_SMALL, anchor="n")
-
-    def update(self, elevation_deg, azimuth_deg, link_degraded=False):
-        self._draw(elevation_deg, azimuth_deg, link_degraded)
-
-
-# ---------------------------------------------------------------------------
-# Second-window widgets
-# ---------------------------------------------------------------------------
-
-class TiltGauge(tk.Canvas):
-    """Circular gauge showing dish tilt from vertical."""
-    SIZE = 150
-
-    def __init__(self, parent):
-        super().__init__(parent, width=self.SIZE, height=self.SIZE,
-                         bg=CARD, highlightthickness=0)
-        self._draw(None)
-
-    def _draw(self, tilt_deg):
-        self.delete("all")
-        cx = cy = self.SIZE // 2
-        r = cx - 14
-
-        # Arc background (grey track)
-        self.create_arc(cx-r, cy-r, cx+r, cy+r, start=210, extent=120,
-                        outline=BORDER, style="arc", width=8)
-
-        if tilt_deg is not None:
-            # Map 0–20° tilt onto the 120° arc
-            frac = min(tilt_deg / 20.0, 1.0)
-            color = GREEN if tilt_deg < 5 else (YELLOW if tilt_deg < 10 else RED)
-            self.create_arc(cx-r, cy-r, cx+r, cy+r, start=210,
-                            extent=int(120 * frac), outline=color,
-                            style="arc", width=8)
-            self.create_text(cx, cy - 8, text=f"{tilt_deg:.1f}°",
-                             fill=color, font=("Consolas", 18, "bold"), anchor="center")
-        else:
-            self.create_text(cx, cy - 8, text="--",
-                             fill=DIM, font=("Consolas", 18, "bold"), anchor="center")
-
-        self.create_text(cx, cy + 12, text="tilt from vertical",
-                         fill=DIM, font=("Consolas", 8), anchor="center")
-        self.create_text(cx - r + 4, cy + r - 4, text="0°", fill=DIM, font=("Consolas", 7))
-        self.create_text(cx + r - 4, cy + r - 4, text="20°", fill=DIM, font=("Consolas", 7))
-
-    def update(self, tilt_deg):
-        self._draw(tilt_deg)
 
 
 class SectorChart(tk.Canvas):
@@ -1030,6 +916,58 @@ class SatelliteMatcher:
         idx = int(np.argmin(sep_masked))
         return (self._names[idx], float(sep[idx]), float(az[idx]), float(el[idx]))
 
+    def snapshot(self, lat_deg, lon_deg, alt_m=0.0, min_el=0.0):
+        """For the current instant, return per-satellite arrays for the sky map:
+        dict(name=[...], az=[...], el=[...], sublat=[...], sublon=[...]) for every
+        satellite above min_el as seen from the dish. Vectorised; ~tens of ms."""
+        if self._array is None:
+            return None
+        np = self._np
+        from sgp4.api import jday
+        now = datetime.datetime.now(datetime.timezone.utc)
+        jd, fr = jday(now.year, now.month, now.day,
+                      now.hour, now.minute, now.second + now.microsecond * 1e-6)
+        err, r, _v = self._array.sgp4(np.array([jd]), np.array([fr]))
+        r = r[:, 0, :] * 1000.0
+        good = err[:, 0] == 0
+
+        theta = self._gmst_rad(jd + fr)
+        cT, sT = math.cos(theta), math.sin(theta)
+        x, y, z = r[:, 0], r[:, 1], r[:, 2]
+        xe = cT * x + sT * y          # ECEF (m)
+        ye = -sT * x + cT * y
+        ze = z
+
+        # topocentric az/el from the dish
+        ox, oy, oz, e_hat, n_hat, u_hat = self._observer_ecef(lat_deg, lon_deg, alt_m)
+        dx, dy, dz = xe - ox, ye - oy, ze - oz
+        E = dx * e_hat[0] + dy * e_hat[1] + dz * e_hat[2]
+        N = dx * n_hat[0] + dy * n_hat[1] + dz * n_hat[2]
+        U = dx * u_hat[0] + dy * u_hat[1] + dz * u_hat[2]
+        el = np.degrees(np.arctan2(U, np.hypot(E, N)))
+        az = np.degrees(np.arctan2(E, N)) % 360.0
+
+        # sub-satellite geodetic lat/lon (Bowring) from ECEF
+        a, f = 6378137.0, 1 / 298.257223563
+        b = a * (1 - f)
+        e2 = f * (2 - f)
+        ep2 = (a * a - b * b) / (b * b)
+        p = np.hypot(xe, ye)
+        th = np.arctan2(ze * a, p * b)
+        sublat = np.degrees(np.arctan2(ze + ep2 * b * np.sin(th) ** 3,
+                                       p - e2 * a * np.cos(th) ** 3))
+        sublon = np.degrees(np.arctan2(ye, xe))
+
+        mask = good & (el > min_el)
+        idx = np.nonzero(mask)[0]
+        return {
+            "name":   [self._names[i] for i in idx],
+            "az":     az[idx].tolist(),
+            "el":     el[idx].tolist(),
+            "sublat": sublat[idx].tolist(),
+            "sublon": sublon[idx].tolist(),
+        }
+
     # -- internals ------------------------------------------------------
     def _refresh_cache(self):
         self.CACHE.parent.mkdir(exist_ok=True)
@@ -1066,6 +1004,199 @@ class SatelliteMatcher:
         sec = (67310.54841 + (876600 * 3600 + 8640184.812866) * T
                + 0.093104 * T * T - 6.2e-6 * T * T * T)
         return math.radians((sec % 86400.0) / 240.0 % 360.0)
+
+
+class BorderMap:
+    """Fetches & caches a world admin-1 (states/provinces) GeoJSON and parses it
+    into outline rings (coastlines + state/country borders) for the sky map."""
+    URL = ("https://raw.githubusercontent.com/nvkelso/natural-earth-vector/"
+           "master/geojson/ne_50m_admin_1_states_provinces.geojson")
+    CACHE = Path(__file__).parent / "data" / "geo_borders.json"
+    REFRESH_DAYS = 30
+
+    def __init__(self):
+        self.rings = None   # list of (lons, lats, bbox=(minlon,minlat,maxlon,maxlat))
+
+    def load(self):
+        """Download/cache and parse. Returns (ok, message). Worker-thread safe."""
+        import json
+        try:
+            self._refresh()
+        except Exception as e:
+            if not self.CACHE.exists():
+                return False, f"map download failed: {e}"
+        try:
+            gj = json.loads(self.CACHE.read_text(encoding="utf-8"))
+        except Exception as e:
+            return False, f"map parse failed: {e}"
+        rings = []
+        for feat in gj.get("features", []):
+            geom = feat.get("geometry") or {}
+            t, coords = geom.get("type"), geom.get("coordinates")
+            polys = [coords] if t == "Polygon" else (coords if t == "MultiPolygon" else [])
+            for poly in polys:
+                for ring in poly:                       # exterior + holes
+                    lons = [p[0] for p in ring if len(p) >= 2]
+                    lats = [p[1] for p in ring if len(p) >= 2]
+                    if len(lons) >= 2:
+                        rings.append((lons, lats,
+                                      (min(lons), min(lats), max(lons), max(lats))))
+        if not rings:
+            return False, "no border rings parsed"
+        self.rings = rings
+        return True, f"{len(rings)} border rings"
+
+    def _refresh(self):
+        self.CACHE.parent.mkdir(exist_ok=True)
+        if (self.CACHE.exists() and
+                time.time() - self.CACHE.stat().st_mtime < self.REFRESH_DAYS * 86400):
+            return
+        import urllib.request
+        req = urllib.request.Request(self.URL, headers={"User-Agent": "starlink-dashboard"})
+        data = urllib.request.urlopen(req, timeout=60).read()
+        if len(data) < 1000:
+            raise RuntimeError("empty geojson")
+        self.CACHE.write_bytes(data)
+
+
+class SkyMapPanel:
+    """Top-down, dish-centred sky map: coastline/state/country borders, a 100-mile
+    reference ring, all Starlink sub-satellite points (re-propagated every poll so
+    they move), and the likely satellite highlighted with a line to the dish."""
+    MI_KM = 1.60934
+
+    def __init__(self, parent, sat_enabled_var, on_toggle, status_var):
+        self.frame = make_card(parent, "Satellite Sky Map")
+        ctl = tk.Frame(self.frame, bg=CARD)
+        ctl.pack(fill="x", padx=8)
+        tk.Checkbutton(ctl, text="Track satellites (TLE)", variable=sat_enabled_var,
+                       command=on_toggle, bg=CARD, fg=DIM, selectcolor=BG,
+                       activebackground=CARD, activeforeground=TEXT, font=F_SMALL,
+                       bd=0, highlightthickness=0, cursor="hand2").pack(side="left")
+        tk.Label(ctl, textvariable=status_var, bg=CARD, fg=DIM, font=F_TINY,
+                 anchor="e").pack(side="right")
+        self.canvas = tk.Canvas(self.frame, bg="#0a0f16", highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True, padx=6, pady=(2, 6))
+        self.borders = None
+        self._last = None
+        self.canvas.bind("<Configure>", lambda e: self._redraw())
+
+    def set_borders(self, rings):
+        self.borders = rings
+        self._redraw()
+
+    def update(self, dish_lat, dish_lon, snap, likely_name, likely_sep, baz, bel):
+        self._last = (dish_lat, dish_lon, snap, likely_name, likely_sep, baz, bel)
+        self._redraw()
+
+    @staticmethod
+    def _gc_km(lat1, lon1, lat2, lon2):
+        dlat, dlon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+        a = (math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) *
+             math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2)
+        return 6371.0 * 2 * math.asin(math.sqrt(a))
+
+    def _redraw(self):
+        c = self.canvas
+        c.delete("all")
+        w, h = c.winfo_width(), c.winfo_height()
+        if w < 10 or h < 10:
+            return
+        if not self._last:
+            c.create_text(w // 2, h // 2, text="Acquiring satellites…",
+                          fill=DIM, font=F_SMALL)
+            return
+        dish_lat, dish_lon, snap, likely, sep, baz, bel = self._last
+        if dish_lat is None:
+            c.create_text(w // 2, h // 2, text="Need a dish GPS fix for the sky map",
+                          fill=DIM, font=F_SMALL)
+            return
+
+        cx, cy = w / 2.0, h / 2.0
+        radius_px = min(w, h) / 2.0 - 18
+        ring_km = 100 * self.MI_KM
+        view_km = ring_km * 1.05
+        li = snap["name"].index(likely) if (snap and likely in snap["name"]) else -1
+        if li >= 0:
+            dkm = self._gc_km(dish_lat, dish_lon, snap["sublat"][li], snap["sublon"][li])
+            view_km = max(view_km, dkm * 1.3)
+        view_km = min(max(view_km, 120.0), 1200.0)
+        ppk = radius_px / view_km
+        coslat = max(0.1, math.cos(math.radians(dish_lat)))
+
+        def proj(lat, lon):
+            north = (lat - dish_lat) * 111.32
+            east = (lon - dish_lon) * 111.32 * coslat
+            return cx + east * ppk, cy - north * ppk
+
+        dlat = view_km / 111.32
+        dlon = view_km / (111.32 * coslat)
+        vb = (dish_lon - dlon, dish_lat - dlat, dish_lon + dlon, dish_lat + dlat)
+
+        # --- borders / coastlines (only rings overlapping the view) ---
+        if self.borders:
+            for lons, lats, bbox in self.borders:
+                if bbox[2] < vb[0] or bbox[0] > vb[2] or bbox[3] < vb[1] or bbox[1] > vb[3]:
+                    continue
+                flat = []
+                for lon, lat in zip(lons, lats):
+                    x, y = proj(lat, lon)
+                    flat.extend((x, y))
+                if len(flat) >= 4:
+                    c.create_line(*flat, fill="#2c3a4a", width=1)
+
+        # --- lat/lon graticule ---
+        step = 2 if (vb[2] - vb[0]) > 8 else 1
+        lo = math.floor(vb[0])
+        while lo <= math.ceil(vb[2]):
+            x0, y0 = proj(vb[1], lo); x1, y1 = proj(vb[3], lo)
+            c.create_line(x0, y0, x1, y1, fill="#172029")
+            lo += step
+        la = math.floor(vb[1])
+        while la <= math.ceil(vb[3]):
+            x0, y0 = proj(la, vb[0]); x1, y1 = proj(la, vb[2])
+            c.create_line(x0, y0, x1, y1, fill="#172029")
+            la += step
+
+        # --- 100-mile reference ring ---
+        rp = ring_km * ppk
+        c.create_oval(cx - rp, cy - rp, cx + rp, cy + rp, outline=BLUE, dash=(3, 3))
+        c.create_text(cx + rp * 0.71, cy - rp * 0.71 - 6, text="100 mi",
+                      fill=BLUE, font=F_TINY)
+
+        # --- boresight direction ---
+        if baz is not None:
+            bx = cx + math.sin(math.radians(baz)) * radius_px
+            by = cy - math.cos(math.radians(baz)) * radius_px
+            c.create_line(cx, cy, bx, by, fill=ORANGE, dash=(2, 4))
+
+        # --- satellites ---
+        n_in = 0
+        if snap:
+            for k in range(len(snap["name"])):
+                if k == li:
+                    continue
+                x, y = proj(snap["sublat"][k], snap["sublon"][k])
+                if -20 <= x <= w + 20 and -20 <= y <= h + 20:
+                    n_in += 1
+                    c.create_oval(x - 2, y - 2, x + 2, y + 2, fill=TEAL, outline="")
+
+        # --- likely satellite highlight (drawn last, on top) ---
+        if li >= 0:
+            x, y = proj(snap["sublat"][li], snap["sublon"][li])
+            c.create_line(cx, cy, x, y, fill=YELLOW, width=2)
+            c.create_oval(x - 6, y - 6, x + 6, y + 6, outline=YELLOW, width=2, fill=RED)
+            tag = likely if not sep else f"{likely}  Δ{sep}°"
+            c.create_text(x, y - 12, text=tag, fill=YELLOW, font=F_SMALL)
+            n_in += 1
+
+        # --- dish marker + info ---
+        c.create_oval(cx - 4, cy - 4, cx + 4, cy + 4, fill=GREEN, outline=BG)
+        c.create_text(cx, cy + 11, text="DISH", fill=GREEN, font=F_TINY)
+        info = f"{n_in} sats in view · ~{view_km / self.MI_KM:.0f} mi radius"
+        if baz is not None:
+            info += f" · boresight {baz:.0f}°az {bel:.0f}°el"
+        c.create_text(8, 8, text=info, fill=DIM, font=F_TINY, anchor="nw")
 
 
 LOCATION_FILE = Path(__file__).parent / "location.json"
@@ -1441,6 +1572,8 @@ class Dashboard:
         self._last_sat_match_t = 0.0
         self._last_sat_name = ""       # most recent likely-satellite match (for logging)
         self._last_sat_sep = ""
+        self._border_map = BorderMap()  # coastline/state/country borders for the sky map
+        threading.Thread(target=self._load_borders, daemon=True).start()
         self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._poll_thread.start()
         threading.Thread(target=self._fetch_location, daemon=True).start()
@@ -1502,6 +1635,30 @@ class Dashboard:
             self.root.after(0, self._show_sat_match, None, str(e)[:40])
             return
         self.root.after(0, self._show_sat_match, res, None)
+
+    def _load_borders(self):
+        ok, _msg = self._border_map.load()
+        if ok:
+            self.root.after(0, self.sky_map.set_borders, self._border_map.rings)
+
+    def _update_sky_map(self):
+        """Runs in the poll thread every cycle: snapshot all sats and redraw the map."""
+        if not (self._sat_on and self._sat_loaded):
+            return
+        lat = self.location_panel._dish_lat
+        lon = self.location_panel._dish_lon
+        if lat is None or lon is None:
+            self.root.after(0, self.sky_map.update, None, None, None, None, None, None)
+            return
+        try:
+            snap = self._sat_matcher.snapshot(lat, lon, min_el=20.0)
+        except Exception:
+            return
+        bs = self._last_boresight
+        baz = bs[1] if bs else None
+        bel = bs[0] if bs else None
+        self.root.after(0, self.sky_map.update, lat, lon, snap,
+                        self._last_sat_name, self._last_sat_sep, baz, bel)
 
     def _show_sat_match(self, res, err):
         if err:
@@ -1640,30 +1797,14 @@ class Dashboard:
         main.columnconfigure((0, 1, 2), weight=1, uniform="col")
         main.rowconfigure((0, 1), weight=1, uniform="row")
 
-        # Sky position (moved from main window)
-        sky_frame = make_card(main, "Sky Position")
-        sky_frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
-        self.pointing_canvas = PointingCanvas(sky_frame)
-        self.pointing_canvas.pack(expand=True, pady=4)
-
-        # "Likely satellite" TLE estimate (on by default; kicked off in __init__)
+        # Satellite sky map — replaces the old Sky Position + Dish Tilt panels,
+        # spanning their two cells. (Tilt now shows as a value in Dish Info.)
         self._sat_enabled = tk.BooleanVar(value=True)
-        tk.Checkbutton(
-            sky_frame, text="Estimate satellite (TLE)",
-            variable=self._sat_enabled, command=self._on_toggle_sat,
-            bg=CARD, fg=DIM, selectcolor=BG, activebackground=CARD,
-            activeforeground=TEXT, font=F_SMALL, bd=0, highlightthickness=0,
-            cursor="hand2", anchor="w").pack(fill="x", padx=8)
         self._sat_status_var = tk.StringVar(value="")
-        tk.Label(sky_frame, textvariable=self._sat_status_var, bg=CARD, fg=DIM,
-                 font=F_TINY, wraplength=190, justify="left",
-                 anchor="w").pack(fill="x", padx=8, pady=(0, 4))
-
-        # Dish tilt gauge
-        tilt_frame = make_card(main, "Dish Tilt")
-        tilt_frame.grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
-        self.tilt_gauge = TiltGauge(tilt_frame)
-        self.tilt_gauge.pack(expand=True, pady=8)
+        self.sky_map = SkyMapPanel(main, self._sat_enabled,
+                                   self._on_toggle_sat, self._sat_status_var)
+        self.sky_map.frame.grid(row=0, column=0, columnspan=2,
+                                sticky="nsew", padx=4, pady=4)
 
         # Ready states
         self.ready_panel = ReadyStatesPanel(main)
@@ -1788,6 +1929,9 @@ class Dashboard:
                 msg = str(e)[:80]
                 self.root.after(0, self.status_bar.update, False,
                                 f"Error ({self._error_count}): {msg}")
+            # Sky map runs on TLE + GPS, independent of the dish gRPC link, so it
+            # keeps moving even while the dish is briefly unreachable.
+            self._update_sky_map()
             time.sleep(POLL_INTERVAL)
 
     def _seed_history(self, h):
@@ -1891,19 +2035,14 @@ class Dashboard:
         self._ul_history.append(ul)
         self._draw_history()
 
-        # Use packet loss as the real-time signal-quality indicator for the sky dot
-        # (currently_obstructed reflects the learned map in fw 2026.05.26, not live loss)
-        link_degraded = s.pop_ping_drop_rate > 0.01  # >1% loss = red dot
-        self.pointing_canvas.update(el, az, link_degraded)
-
-        # Dish tilt from orientation quaternion (fields: x=1, w=2, y=3, z=4)
+        # Dish tilt from orientation quaternion (fields: x=1, w=2, y=3, z=4) ->
+        # shown as a value in the Dish Info panel (the gauge graphic was removed).
         q = s.tilt_quaternion
         w, x, y, z = q.w, q.x, q.y, q.z
         if abs(w) > 0.01 or abs(x) > 0.01:
-            # Rotate [0,0,1] by quaternion, tilt = angle between result and [0,0,1]
             rz = w*w - x*x - y*y + z*z
             tilt_deg = math.degrees(math.acos(max(-1.0, min(1.0, rz))))
-            self.tilt_gauge.update(tilt_deg)
+            self.info_panel.set("Tilt", f"{tilt_deg:.1f}° from vertical")
 
         self.sector_chart.update(s.sector_signal)
         self.ready_panel.update(s.ready_states)
