@@ -37,7 +37,10 @@ optional "likely satellite" estimate:
   highlighted with a line to the dish and its boresight offset. Fixed scale
   (~450 km left/right) with a 200 km reference ring, a boresight bearing line, and
   a north indicator. (Borders come from a one-time cached Natural Earth GeoJSON;
-  falls back to a grid if offline.)
+  falls back to a grid if offline.) An optional **obstruction overlay** (toggle)
+  shades each azimuth sector of the dish's per-sector map as a translucent wedge in
+  the outer band (toward the horizon, where obstructions live), leaving the
+  near-overhead area clear; uses Pillow for smooth alpha, with a stippled fallback.
 - Per-sector map — 10-segment radial ring chart of the dish's per-sector sky
   scan (field 1028); a slowly-updating map that shifts over hours, not seconds
 - Ready-states indicator — each dish subsystem bring-up flag (CADY, SCP, L1/L2,

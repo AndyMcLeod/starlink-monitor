@@ -1074,13 +1074,25 @@ class SkyMapPanel:
                        command=on_toggle, bg=CARD, fg=DIM, selectcolor=BG,
                        activebackground=CARD, activeforeground=TEXT, font=F_SMALL,
                        bd=0, highlightthickness=0, cursor="hand2").pack(side="left")
+        # Prototype: translucent per-sector obstruction overlay (coarse az-only data)
+        self.show_obstr = tk.BooleanVar(value=True)
+        tk.Checkbutton(ctl, text="Obstruction", variable=self.show_obstr,
+                       command=self._redraw, bg=CARD, fg=DIM, selectcolor=BG,
+                       activebackground=CARD, activeforeground=TEXT, font=F_SMALL,
+                       bd=0, highlightthickness=0, cursor="hand2").pack(side="left",
+                                                                        padx=(12, 0))
         tk.Label(ctl, textvariable=status_var, bg=CARD, fg=DIM, font=F_TINY,
                  anchor="e").pack(side="right")
         self.canvas = tk.Canvas(self.frame, bg="#0a0f16", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True, padx=6, pady=(2, 6))
         self.borders = None
         self._last = None
+        self._sectors = None      # latest 10 per-sector values, for the overlay
+        self._overlay_img = None  # keep a ref so Tk doesn't GC the PhotoImage
         self.canvas.bind("<Configure>", lambda e: self._redraw())
+
+    def set_sectors(self, vals):
+        self._sectors = vals
 
     def set_borders(self, rings):
         self.borders = rings
@@ -1179,6 +1191,10 @@ class SkyMapPanel:
             c.create_line(x0, y0, x1, y1, fill="#172029")
             la += step
 
+        # --- translucent per-sector obstruction overlay (drawn under the ring/sats) ---
+        if self.show_obstr.get() and self._sectors:
+            self._draw_obstruction(c, cx, cy, w, h, self.RING_KM * ppk)
+
         # --- reference ring ---
         rp = self.RING_KM * ppk
         c.create_oval(cx - rp, cy - rp, cx + rp, cy + rp, outline=BLUE, dash=(3, 3))
@@ -1227,6 +1243,62 @@ class SkyMapPanel:
         if baz is not None:
             info += f" · boresight {baz:.0f}°az {bel:.0f}°el"
         c.create_text(8, 8, text=info, fill=DIM, font=F_TINY, anchor="nw")
+
+    # ------------------------------------------------------------------
+    # Prototype obstruction overlay
+    # ------------------------------------------------------------------
+    # The dish's per-sector map (field 1028) is azimuth-only and coarse (10 wedges
+    # of 36°). We render it as translucent red pie-wedges radiating from the dish:
+    # the lower a sector's value, the more likely that bearing is obstructed, so the
+    # redder/more opaque the wedge. NOTE the sector->azimuth alignment (sector 1 =
+    # north, clockwise) is an assumption; the elevation dimension is absent, so a
+    # wedge shades a whole bearing rather than a specific sky patch.
+    SECTOR_LO, SECTOR_HI = 20.0, 50.0   # same value scale as the per-sector chart
+    OBSTR_MAX_ALPHA = 90                # subtle: peak opacity out of 255
+
+    def _draw_obstruction(self, c, cx, cy, w, h, r_inner):
+        """Shade each azimuth sector as an annular wedge from r_inner out to the
+        edge - the outer band only, since obstructions live near the horizon (low
+        elevation = far from the dish). Inside r_inner (near-overhead) stays clear."""
+        vals = self._sectors
+        if not vals:
+            return
+        R = math.hypot(w, h)            # reach the corners
+        r_inner = max(8.0, r_inner)
+        lo, hi = self.SECTOR_LO, self.SECTOR_HI
+        try:
+            from PIL import Image, ImageDraw, ImageTk
+            img = Image.new("RGBA", (max(1, w), max(1, h)), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)                 # replaces pixels (incl. alpha)
+            drew = False
+            for i, val in enumerate(vals[:10]):
+                frac = max(0.0, min(1.0, (val - lo) / (hi - lo)))   # 1 clear, 0 blocked
+                obstr = 1.0 - frac
+                if obstr <= 0.05:
+                    continue
+                drew = True
+                az = i * 36.0
+                # compass az -> PIL angle (image y-down, 0=east, clockwise): az - 90
+                start = az - 18 - 90 + 360
+                a = int(8 + obstr * self.OBSTR_MAX_ALPHA)
+                d.pieslice([cx - R, cy - R, cx + R, cy + R], start, start + 36,
+                           fill=(248, 81, 73, a))
+            if drew:
+                # punch out the inner disc -> annulus (ImageDraw replaces alpha)
+                d.ellipse([cx - r_inner, cy - r_inner, cx + r_inner, cy + r_inner],
+                          fill=(0, 0, 0, 0))
+                self._overlay_img = ImageTk.PhotoImage(img)
+                c.create_image(0, 0, anchor="nw", image=self._overlay_img)
+        except Exception:
+            # zero-dependency fallback: stippled outer wedges (dithered transparency)
+            for i, val in enumerate(vals[:10]):
+                obstr = 1.0 - max(0.0, min(1.0, (vals[i] - lo) / (hi - lo)))
+                if obstr <= 0.1:
+                    continue
+                az = i * 36.0
+                c.create_arc(cx - R, cy - R, cx + R, cy + R,
+                             start=(90 - (az + 18)) % 360, extent=36,
+                             style="pieslice", outline="", fill=RED, stipple="gray12")
 
 
 LOCATION_FILE = Path(__file__).parent / "location.json"
@@ -2080,6 +2152,8 @@ class Dashboard:
             self.info_panel.set("Tilt", f"{tilt_deg:.1f}° from vertical")
 
         self.sector_chart.update(s.sector_signal)
+        self.sky_map.set_sectors(
+            [getattr(s.sector_signal, f"s{i}", 0) for i in range(1, 11)])
         self.ready_panel.update(s.ready_states)
 
         # Extended info panel

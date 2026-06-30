@@ -5,3 +5,7 @@ pyserial>=3.5
 # Optional — only needed for the detail window's "Likely satellite" TLE estimate
 sgp4>=2.21
 numpy>=1.21
+
+# Optional — smooth (true-alpha) obstruction overlay on the sky map; without it the
+# overlay falls back to a stippled (dithered) wedge, so the app still runs.
+Pillow>=9.0
