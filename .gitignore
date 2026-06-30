@@ -40,3 +40,6 @@ starlink_proto/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Local Claude Project bundle (contains chat transcripts; not for the public repo)
+project-knowledge/
