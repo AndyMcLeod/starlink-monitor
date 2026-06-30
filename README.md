@@ -51,7 +51,7 @@ optional "likely satellite" estimate:
 **Data logging**
 - Every poll is appended to a CSV in `data/`, one file per UTC day
   (`data/starlink_YYYY-MM-DD.csv`), covering throughput, latency, loss, SNR,
-  pointing, tilt, obstruction events, GPS, and more.
+  pointing, tilt, obstruction events, GPS, the likely-satellite match, and more.
 
 ---
 

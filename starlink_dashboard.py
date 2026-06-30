@@ -863,6 +863,7 @@ LOG_FIELDS = [
     "gps_lat", "gps_lon", "gps_sats", "gps_quality",
     "firmware", "country",
     "cum_dl_gb", "cum_ul_gb",
+    "likely_sat", "likely_sat_sep_deg",
 ]
 
 
@@ -877,6 +878,15 @@ class DataLogger:
         self._fh   = None
         self._csv  = None
 
+    @staticmethod
+    def _header_matches(path):
+        """True if the file's first row equals the current LOG_FIELDS."""
+        try:
+            with open(path, newline="", encoding="utf-8") as f:
+                return next(csv.reader(f), None) == LOG_FIELDS
+        except Exception:
+            return False
+
     def _rotate(self):
         today = datetime.datetime.now(datetime.timezone.utc).date()
         if today == self._date and self._fh:
@@ -884,7 +894,14 @@ class DataLogger:
         if self._fh:
             self._fh.close()
         self._date = today
-        path = self.DATA_DIR / f"starlink_{today.isoformat()}.csv"
+        # Find a day-file that's either new or already uses the current schema, so
+        # a column change (e.g. added likely_sat) never mixes widths within a file.
+        base = f"starlink_{today.isoformat()}"
+        path = self.DATA_DIR / f"{base}.csv"
+        suffix = 1
+        while path.exists() and not self._header_matches(path):
+            suffix += 1
+            path = self.DATA_DIR / f"{base}_{suffix}.csv"
         write_header = not path.exists()
         self._fh  = open(path, "a", newline="", encoding="utf-8")
         self._csv = csv.writer(self._fh)
@@ -1419,6 +1436,8 @@ class Dashboard:
         self._sat_loaded = False
         self._last_boresight = None    # (el, az) from most recent status
         self._last_sat_match_t = 0.0
+        self._last_sat_name = ""       # most recent likely-satellite match (for logging)
+        self._last_sat_sep = ""
         self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._poll_thread.start()
         threading.Thread(target=self._fetch_location, daemon=True).start()
@@ -1485,14 +1504,17 @@ class Dashboard:
         if err:
             self.detail_info.set("Likely Sat", "--", DIM)
             self._sat_status_var.set(f"Sat: {err}")
+            self._last_sat_name, self._last_sat_sep = "", ""
             return
         if not res:
             self.detail_info.set("Likely Sat", "no sat above horizon", DIM)
+            self._last_sat_name, self._last_sat_sep = "", ""
             return
         name, sep, _saz, _sel = res
         color = GREEN if sep < 3 else (YELLOW if sep < 8 else ORANGE)
         self.detail_info.set("Likely Sat", f"{name}  (Δ{sep:.1f}°)", color)
         self._sat_status_var.set(f"Sat: nearest of catalogue, Δ{sep:.1f}° from boresight")
+        self._last_sat_name, self._last_sat_sep = name, f"{sep:.2f}"
 
     def _reconnect_gps(self, port):
         save_gps_port(port)
@@ -1937,6 +1959,8 @@ class Dashboard:
             "country":             di.country_code,
             "cum_dl_gb":           f"{self._cum_dl_gb:.6f}",
             "cum_ul_gb":           f"{self._cum_ul_gb:.6f}",
+            "likely_sat":          self._last_sat_name,
+            "likely_sat_sep_deg":  self._last_sat_sep,
         })
 
     def _draw_history(self):
