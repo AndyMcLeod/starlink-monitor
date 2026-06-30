@@ -34,10 +34,10 @@ optional "likely satellite" estimate:
 - **Satellite sky map** — a top-down, dish-centred map (coastlines + state/country
   borders + lat/lon grid) that plots every Starlink satellite's sub-point, moving
   in real time as they're re-propagated each poll. The likely satellite is
-  highlighted with a line to the dish and its boresight offset; a 100-mile
-  reference ring is drawn and the view auto-fits to keep the likely sat visible.
-  (Borders come from a one-time cached Natural Earth GeoJSON; falls back to a grid
-  if offline.)
+  highlighted with a line to the dish and its boresight offset. Fixed scale
+  (~450 km left/right) with a 200 km reference ring, a boresight bearing line, and
+  a north indicator. (Borders come from a one-time cached Natural Earth GeoJSON;
+  falls back to a grid if offline.)
 - Per-sector map — 10-segment radial ring chart of the dish's per-sector sky
   scan (field 1028); a slowly-updating map that shifts over hours, not seconds
 - Ready-states indicator — each dish subsystem bring-up flag (CADY, SCP, L1/L2,

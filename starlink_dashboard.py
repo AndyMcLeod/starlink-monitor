@@ -1060,10 +1060,11 @@ class BorderMap:
 
 
 class SkyMapPanel:
-    """Top-down, dish-centred sky map: coastline/state/country borders, a 100-mile
-    reference ring, all Starlink sub-satellite points (re-propagated every poll so
-    they move), and the likely satellite highlighted with a line to the dish."""
-    MI_KM = 1.60934
+    """Top-down, dish-centred sky map: coastline/state/country borders, a fixed-scale
+    view with a reference ring, all Starlink sub-satellite points (re-propagated every
+    poll so they move), and the likely satellite highlighted with a line to the dish."""
+    VIEW_HALF_KM = 450.0   # fixed left/right half-range (centre -> left/right edge)
+    RING_KM      = 200.0   # reference ring radius
 
     def __init__(self, parent, sat_enabled_var, on_toggle, status_var):
         self.frame = make_card(parent, "Satellite Sky Map")
@@ -1113,15 +1114,11 @@ class SkyMapPanel:
             return
 
         cx, cy = w / 2.0, h / 2.0
-        radius_px = min(w, h) / 2.0 - 18
-        ring_km = 100 * self.MI_KM
-        view_km = ring_km * 1.05
+        margin = 16
+        # Fixed scale: the left/right edges are VIEW_HALF_KM from the dish, so the
+        # zoom never changes with the satellite geometry.
+        ppk = (w / 2.0 - margin) / self.VIEW_HALF_KM
         li = snap["name"].index(likely) if (snap and likely in snap["name"]) else -1
-        if li >= 0:
-            dkm = self._gc_km(dish_lat, dish_lon, snap["sublat"][li], snap["sublon"][li])
-            view_km = max(view_km, dkm * 1.3)
-        view_km = min(max(view_km, 120.0), 1200.0)
-        ppk = radius_px / view_km
         coslat = max(0.1, math.cos(math.radians(dish_lat)))
 
         def proj(lat, lon):
@@ -1129,8 +1126,11 @@ class SkyMapPanel:
             east = (lon - dish_lon) * 111.32 * coslat
             return cx + east * ppk, cy - north * ppk
 
-        dlat = view_km / 111.32
-        dlon = view_km / (111.32 * coslat)
+        # visible half-extents (km) -> view bbox for border/graticule culling
+        half_w_km = self.VIEW_HALF_KM
+        half_h_km = (h / 2.0 - margin) / ppk
+        dlat = half_h_km / 111.32
+        dlon = half_w_km / (111.32 * coslat)
         vb = (dish_lon - dlon, dish_lat - dlat, dish_lon + dlon, dish_lat + dlat)
 
         # --- borders / coastlines (only rings overlapping the view) ---
@@ -1158,16 +1158,17 @@ class SkyMapPanel:
             c.create_line(x0, y0, x1, y1, fill="#172029")
             la += step
 
-        # --- 100-mile reference ring ---
-        rp = ring_km * ppk
+        # --- reference ring ---
+        rp = self.RING_KM * ppk
         c.create_oval(cx - rp, cy - rp, cx + rp, cy + rp, outline=BLUE, dash=(3, 3))
-        c.create_text(cx + rp * 0.71, cy - rp * 0.71 - 6, text="100 mi",
-                      fill=BLUE, font=F_TINY)
+        c.create_text(cx + rp * 0.71, cy - rp * 0.71 - 6,
+                      text=f"{self.RING_KM:.0f} km", fill=BLUE, font=F_TINY)
 
-        # --- boresight direction ---
+        # --- boresight direction (extend well past the edge; tk clips it) ---
         if baz is not None:
-            bx = cx + math.sin(math.radians(baz)) * radius_px
-            by = cy - math.cos(math.radians(baz)) * radius_px
+            reach = math.hypot(w, h)
+            bx = cx + math.sin(math.radians(baz)) * reach
+            by = cy - math.cos(math.radians(baz)) * reach
             c.create_line(cx, cy, bx, by, fill=ORANGE, dash=(2, 4))
 
         # --- satellites ---
@@ -1190,10 +1191,18 @@ class SkyMapPanel:
             c.create_text(x, y - 12, text=tag, fill=YELLOW, font=F_SMALL)
             n_in += 1
 
-        # --- dish marker + info ---
+        # --- dish marker ---
         c.create_oval(cx - 4, cy - 4, cx + 4, cy + 4, fill=GREEN, outline=BG)
         c.create_text(cx, cy + 11, text="DISH", fill=GREEN, font=F_TINY)
-        info = f"{n_in} sats in view · ~{view_km / self.MI_KM:.0f} mi radius"
+
+        # --- north indicator (map is north-up) ---
+        nx, ny = w - 20, 32
+        c.create_line(nx, ny, nx, ny - 18, fill=TEXT, width=2,
+                      arrow="last", arrowshape=(7, 9, 3))
+        c.create_text(nx, ny - 27, text="N", fill=TEXT, font=F_SMALL)
+
+        # --- info overlay ---
+        info = f"{n_in} sats shown · {self.VIEW_HALF_KM:.0f} km L/R"
         if baz is not None:
             info += f" · boresight {baz:.0f}°az {bel:.0f}°el"
         c.create_text(8, 8, text=info, fill=DIM, font=F_TINY, anchor="nw")
