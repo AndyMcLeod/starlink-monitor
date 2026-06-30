@@ -43,3 +43,6 @@ desktop.ini
 
 # Local Claude Project bundle (contains chat transcripts; not for the public repo)
 project-knowledge/
+
+# Office temp/lock files
+~$*
