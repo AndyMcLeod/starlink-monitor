@@ -1,6 +1,6 @@
 # Reverse-Engineering a Starlink Dish by Conversation - One-Page Summary
 
-**Artifact:** `starlink-monitor` - <https://github.com/amcleodUNH/starlink-monitor> (MIT, releases v1.0.0–v1.0.7)
+**Artifact:** `starlink-monitor` - <https://github.com/AndyMcLeod/starlink-monitor> (MIT, releases v1.0.0–v1.0.7)
 **Author:** A. McLeod · **Built by:** Claude (Anthropic), Claude Code, under direction in plain language.
 
 **What it is.** A standalone Python desktop dashboard. It monitors a Starlink dish in real time. It uses the dish's local, unauthenticated gRPC interface at `192.168.100.1`. No account, no app, no internet login. It shows the live link: throughput, latency, loss, and SNR, each with a history. It shows pointing and obstruction state. It shows a serial-GPS position with the raw NMEA feed. It shows a moving satellite sky map, drawn over real coastlines and borders. It writes a daily telemetry log. It all runs from a single file. I am a marine instrumentation engineer, not a programmer. I wrote none of the source.

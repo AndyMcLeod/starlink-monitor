@@ -2,7 +2,7 @@
 
 **Author:** A. McLeod
 **Development assistant:** Claude (Anthropic), Claude Code
-**Artifact:** `starlink-monitor` - <https://github.com/amcleodUNH/starlink-monitor>
+**Artifact:** `starlink-monitor` - <https://github.com/AndyMcLeod/starlink-monitor>
 
 ---
 
@@ -178,7 +178,7 @@ A field practitioner produced, debugged, hardened, and published a second operat
 
 ### Materials and reproducibility
 
-The complete artifact lives at <https://github.com/amcleodUNH/starlink-monitor> under the MIT License, across tagged releases. It includes the runtime-compiled gRPC client, the two-window interface, and the satellite sky map. The telemetry field mappings were established by wire-decoding the dish's own replies. They were verified against the firmware build named in the application's `KNOWN_FIRMWARE` constant. The satellite look-angle math was cross-checked against an independent ephemeris library, to within a fraction of a degree. The mismapped fields of §2 were identified by holding a decoded reading against a streamed value, a clear sky, or the same field on a later poll.
+The complete artifact lives at <https://github.com/AndyMcLeod/starlink-monitor> under the MIT License, across tagged releases. It includes the runtime-compiled gRPC client, the two-window interface, and the satellite sky map. The telemetry field mappings were established by wire-decoding the dish's own replies. They were verified against the firmware build named in the application's `KNOWN_FIRMWARE` constant. The satellite look-angle math was cross-checked against an independent ephemeris library, to within a fraction of a degree. The mismapped fields of §2 were identified by holding a decoded reading against a streamed value, a clear sky, or the same field on a later poll.
 
 ### A note on authorship
 
