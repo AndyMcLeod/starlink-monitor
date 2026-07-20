@@ -36,7 +36,13 @@ GPS_PORT = "COM10"
 GPS_BAUD = 9600
 
 # Optional "Likely satellite" TLE matching (detail window). Requires sgp4 + numpy.
-SAT_MATCH_INTERVAL = 15   # seconds between TLE look-angle matches (handoffs are ~15 s)
+# Starlink schedules beams on a fixed 15 s grid: a dish re-selects the best
+# satellite at each boundary and holds that choice for the whole window. The grid
+# is phase-locked to :12, :27, :42 and :57 past every minute (12 s offset, 15 s
+# step). The estimator therefore re-evaluates once per window on that same phase -
+# not on a free-running timer - and reports where we are in the current lock window.
+HANDOFF_PERIOD = 15   # s the dish holds a satellite before it may re-select
+HANDOFF_OFFSET = 12   # s past the minute the 15 s grid is anchored to
 
 # ---------------------------------------------------------------------------
 # Proto generation (embedded .proto, compiled at first run)
@@ -823,6 +829,19 @@ class DataLogger:
 # Dependencies (sgp4 + numpy) are imported lazily; if missing, the feature stays
 # disabled with a helpful message instead of breaking the dashboard.
 
+def handoff_window(now=None):
+    """Return (start, end) UTC datetimes bracketing the 15 s beam-scheduling window
+    that contains `now`. Windows are anchored to HANDOFF_OFFSET seconds past each
+    minute and repeat every HANDOFF_PERIOD, i.e. they begin at :12, :27, :42, :57."""
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+    sec = now.second + now.microsecond * 1e-6
+    k = math.floor((sec - HANDOFF_OFFSET) / HANDOFF_PERIOD)
+    start_sec = HANDOFF_OFFSET + k * HANDOFF_PERIOD
+    start = now.replace(second=0, microsecond=0) + datetime.timedelta(seconds=start_sec)
+    return start, start + datetime.timedelta(seconds=HANDOFF_PERIOD)
+
+
 class SatelliteMatcher:
     TLE_URL = ("https://celestrak.org/NORAD/elements/gp.php"
                "?GROUP=starlink&FORMAT=tle")
@@ -872,14 +891,15 @@ class SatelliteMatcher:
         self._array = SatrecArray(recs)
         return True, f"{len(recs)} satellites"
 
-    def match(self, lat_deg, lon_deg, az_deg, el_deg, alt_m=0.0):
+    def match(self, lat_deg, lon_deg, az_deg, el_deg, alt_m=0.0, when=None):
         """Return (name, separation_deg, sat_az, sat_el) of the closest satellite,
-        or None. Vectorised SGP4 over the whole catalogue (~tens of ms)."""
+        or None. Vectorised SGP4 over the whole catalogue (~tens of ms).
+        `when` (UTC datetime) fixes the propagation epoch; defaults to now."""
         if self._array is None:
             return None
         np = self._np
         from sgp4.api import jday
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = when or datetime.datetime.now(datetime.timezone.utc)
         jd, fr = jday(now.year, now.month, now.day,
                       now.hour, now.minute, now.second + now.microsecond * 1e-6)
         err, r, _v = self._array.sgp4(np.array([jd]), np.array([fr]))
@@ -1671,7 +1691,8 @@ class Dashboard:
         self._sat_on = False           # plain mirror of the tk checkbox (thread-safe read)
         self._sat_loaded = False
         self._last_boresight = None    # (el, az) from most recent status
-        self._last_sat_match_t = 0.0
+        self._sat_window_start = None  # start of the handoff window we last matched for
+        self._sat_base_status = ""     # sat status line sans the live countdown suffix
         self._last_sat_name = ""       # most recent likely-satellite match (for logging)
         self._last_sat_sep = ""
         self._border_map = BorderMap()  # coastline/state/country borders for the sky map
@@ -1706,7 +1727,7 @@ class Dashboard:
             return
         if self._sat_loaded:
             self._sat_status_var.set("Sat: matching…")
-            self._last_sat_match_t = 0.0   # force a match on next poll
+            self._sat_window_start = None   # force a match on next poll
         else:
             self._sat_status_var.set("Sat: loading TLE catalogue…")
             threading.Thread(target=self._load_sat_tle, daemon=True).start()
@@ -1714,29 +1735,38 @@ class Dashboard:
     def _load_sat_tle(self):
         ok, msg = self._sat_matcher.load()
         self._sat_loaded = ok
-        self._last_sat_match_t = 0.0
+        self._sat_window_start = None
         self.root.after(0, self._sat_status_var.set,
                         f"TLE: {msg}" if ok else f"Sat unavailable — {msg}")
 
     def _maybe_match_satellite(self):
-        """Runs in the poll thread. Throttled, vectorised, never blocks the UI."""
+        """Runs in the poll thread. The dish holds one satellite per 15 s handoff
+        window, so re-match only when the window rolls over; otherwise just refresh
+        the countdown to the next handoff. Vectorised, never blocks the UI."""
         if not (self._sat_on and self._sat_loaded):
             return
-        if time.time() - self._last_sat_match_t < SAT_MATCH_INTERVAL:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        start, end = handoff_window(now)
+        remain = (end - now).total_seconds()
+        if self._sat_window_start == start:
+            # still inside the current lock window: identity is unchanged, tick clock
+            self.root.after(0, self._update_handoff_countdown, remain)
             return
         bs = self._last_boresight
         lat = self.location_panel._dish_lat
         lon = self.location_panel._dish_lon
         if bs is None or lat is None or lon is None:
-            self.root.after(0, self._show_sat_match, None, "need GPS fix + pointing")
+            self.root.after(0, self._show_sat_match, None, "need GPS fix + pointing", remain)
             return
-        self._last_sat_match_t = time.time()
+        self._sat_window_start = start
         try:
-            res = self._sat_matcher.match(lat, lon, bs[1], bs[0])
+            # Evaluate at `now` so boresight and satellite positions are contemporaneous;
+            # the result then stands for the remainder of this handoff window.
+            res = self._sat_matcher.match(lat, lon, bs[1], bs[0], when=now)
         except Exception as e:
-            self.root.after(0, self._show_sat_match, None, str(e)[:40])
+            self.root.after(0, self._show_sat_match, None, str(e)[:40], remain)
             return
-        self.root.after(0, self._show_sat_match, res, None)
+        self.root.after(0, self._show_sat_match, res, None, remain)
 
     def _load_borders(self):
         ok, _msg = self._border_map.load()
@@ -1762,21 +1792,32 @@ class Dashboard:
         self.root.after(0, self.sky_map.update, lat, lon, snap,
                         self._last_sat_name, self._last_sat_sep, baz, bel)
 
-    def _show_sat_match(self, res, err):
+    def _show_sat_match(self, res, err, remain=None):
         if err:
             self.detail_info.set("Likely Sat", "--", DIM)
-            self._sat_status_var.set(f"Sat: {err}")
+            self._sat_base_status = f"Sat: {err}"
             self._last_sat_name, self._last_sat_sep = "", ""
-            return
-        if not res:
+        elif not res:
             self.detail_info.set("Likely Sat", "no sat above horizon", DIM)
+            self._sat_base_status = "Sat: no satellite above horizon"
             self._last_sat_name, self._last_sat_sep = "", ""
-            return
-        name, sep, _saz, _sel = res
-        color = GREEN if sep < 3 else (YELLOW if sep < 8 else ORANGE)
-        self.detail_info.set("Likely Sat", f"{name}  (Δ{sep:.1f}°)", color)
-        self._sat_status_var.set(f"Sat: nearest of catalogue, Δ{sep:.1f}° from boresight")
-        self._last_sat_name, self._last_sat_sep = name, f"{sep:.2f}"
+        else:
+            name, sep, _saz, _sel = res
+            color = GREEN if sep < 3 else (YELLOW if sep < 8 else ORANGE)
+            self.detail_info.set("Likely Sat", f"{name}  (Δ{sep:.1f}°)", color)
+            self._sat_base_status = (f"Sat: nearest of catalogue, "
+                                     f"Δ{sep:.1f}° from boresight")
+            self._last_sat_name, self._last_sat_sep = name, f"{sep:.2f}"
+        self._update_handoff_countdown(remain)
+
+    def _update_handoff_countdown(self, remain):
+        """Append the live 'next handoff in N s' countdown to the sat status line.
+        The dish may switch satellites when this reaches zero (or hold the same one)."""
+        base = self._sat_base_status
+        if base and remain is not None:
+            self._sat_status_var.set(f"{base}  ·  next handoff in {remain:0.0f} s")
+        elif base:
+            self._sat_status_var.set(base)
 
     def _reconnect_gps(self, port):
         save_gps_port(port)
