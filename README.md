@@ -55,8 +55,13 @@ optional "likely satellite" estimate:
   closest to the dish's reported boresight, with the angular offset (Δ). Needs a
   dish GPS fix (or manual coordinates) plus the `sgp4` + `numpy` packages; if
   those are missing it just shows a hint and the rest of the app is unaffected.
-  It is a best-guess — beam handoffs occur every ~15 s and several satellites can
-  share a look-angle, and the dish never reveals the real satellite ID.
+  The estimate is **phase-locked to the dish's beam-handoff schedule**: Starlink
+  re-selects the serving satellite on a fixed 15 s grid anchored at :12/:27/:42/:57
+  past each minute and holds that choice for the whole window, so the estimator
+  re-matches once per window on that same phase (not on a free-running timer) and
+  shows a live "next handoff in N s" countdown to when the dish may switch. It is
+  still a best-guess — several satellites can share a look-angle, and the dish
+  never reveals the real satellite ID.
 
 **Data logging**
 - Every poll is appended to a CSV in `data/`, one file per UTC day
@@ -116,7 +121,8 @@ Edit the constants at the top of `starlink_dashboard.py`:
 | `HISTORY_LEN` | `600` | Sparkline buffer (600 pts × 2 s = 20 min) |
 | `HIST_POINTS` | `600` | Throughput-history buffer (20 min) |
 | `BOXCAR_N` | `100` | Sample window for the throughput moving mean |
-| `SAT_MATCH_INTERVAL` | `15` | Seconds between TLE satellite matches |
+| `HANDOFF_PERIOD` | `15` | Beam-handoff window length the estimator matches on |
+| `HANDOFF_OFFSET` | `12` | Seconds past the minute the 15 s handoff grid is anchored to |
 | `GPS_PORT` | `COM10` | Default serial port for the GPS receiver |
 | `GPS_BAUD` | `9600` | GPS baud rate |
 
