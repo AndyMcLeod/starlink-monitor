@@ -45,6 +45,31 @@ HANDOFF_PERIOD = 15   # s the dish holds a satellite before it may re-select
 HANDOFF_OFFSET = 12   # s past the minute the 15 s grid is anchored to
 
 # ---------------------------------------------------------------------------
+# Frozen-build awareness (PyInstaller .exe)
+# ---------------------------------------------------------------------------
+# When run as a bundled .exe two assumptions from the source layout break:
+#   1. there is no Python interpreter to invoke `-m grpc_tools.protoc`, and
+#   2. __file__ points inside a temp extraction dir that is wiped on exit.
+# So writable files (logs, caches, saved settings) anchor to the folder holding
+# the .exe, and the protobuf is pre-compiled at build time and bundled instead
+# of compiled on first run. In source mode both bases are the script's folder,
+# so nothing about the normal `python starlink_dashboard.py` path changes.
+FROZEN = getattr(sys, "frozen", False)
+
+def _writable_base():
+    """Folder for files the app creates at runtime. Next to the .exe when frozen."""
+    return Path(sys.executable).parent if FROZEN else Path(__file__).parent
+
+def _bundle_base():
+    """Folder holding read-only resources baked into the build (the compiled
+    protobuf modules). PyInstaller extracts them under sys._MEIPASS."""
+    if FROZEN:
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    return Path(__file__).parent
+
+APP_DIR = _writable_base()
+
+# ---------------------------------------------------------------------------
 # Proto generation (embedded .proto, compiled at first run)
 # ---------------------------------------------------------------------------
 
@@ -193,6 +218,10 @@ message Response {
 
 
 def ensure_proto_compiled():
+    if FROZEN:
+        # pb2 modules were generated at build time and bundled; no protoc needed.
+        sys.path.insert(0, str(_bundle_base()))
+        return
     PROTO_DIR.mkdir(exist_ok=True)
     pb2_file = PROTO_DIR / "starlink_pb2.py"
     existing = PROTO_FILE.read_text() if PROTO_FILE.exists() else ""
@@ -765,7 +794,7 @@ LOG_FIELDS = [
 class DataLogger:
     """Appends one CSV row per poll. Rotates to a new file at the UTC day boundary."""
 
-    DATA_DIR = Path(__file__).parent / "data"
+    DATA_DIR = APP_DIR / "data"
 
     def __init__(self):
         self.DATA_DIR.mkdir(exist_ok=True)
@@ -845,7 +874,7 @@ def handoff_window(now=None):
 class SatelliteMatcher:
     TLE_URL = ("https://celestrak.org/NORAD/elements/gp.php"
                "?GROUP=starlink&FORMAT=tle")
-    CACHE   = Path(__file__).parent / "data" / "starlink_tle.txt"
+    CACHE   = APP_DIR / "data" / "starlink_tle.txt"
     REFRESH_H = 8       # re-download TLEs if cache older than this
     MIN_EL    = 10.0    # ignore satellites below this elevation (deg)
 
@@ -1031,7 +1060,7 @@ class BorderMap:
     into outline rings (coastlines + state/country borders) for the sky map."""
     URL = ("https://raw.githubusercontent.com/nvkelso/natural-earth-vector/"
            "master/geojson/ne_50m_admin_1_states_provinces.geojson")
-    CACHE = Path(__file__).parent / "data" / "geo_borders.json"
+    CACHE = APP_DIR / "data" / "geo_borders.json"
     REFRESH_DAYS = 30
 
     def __init__(self):
@@ -1321,7 +1350,7 @@ class SkyMapPanel:
                              style="pieslice", outline="", fill=RED, stipple="gray12")
 
 
-LOCATION_FILE = Path(__file__).parent / "location.json"
+LOCATION_FILE = APP_DIR / "location.json"
 
 def _load_config():
     try:
@@ -2364,7 +2393,7 @@ def _setup_crash_logging(root):
     exception (and any hard crash) to data/crash.log and keep running, rather
     than letting a single bad frame take the whole app down."""
     import faulthandler, traceback
-    log_path = Path(__file__).parent / "data" / "crash.log"
+    log_path = APP_DIR / "data" / "crash.log"
     try:
         log_path.parent.mkdir(exist_ok=True)
         fh = open(log_path, "a", buffering=1, encoding="utf-8")
@@ -2390,7 +2419,21 @@ def _setup_crash_logging(root):
 
 
 def main():
-    print("Compiling Starlink protobuf definitions...")
+    # A --windowed frozen build has no console: sys.stdout/stderr are None, and the
+    # startup print()s below would crash before the UI appears. Route them to a log
+    # next to the .exe so nothing is lost and startup stays diagnosable.
+    if FROZEN and (sys.stdout is None or sys.stderr is None):
+        try:
+            (APP_DIR / "data").mkdir(parents=True, exist_ok=True)
+            _cl = open(APP_DIR / "data" / "console.log", "a", buffering=1, encoding="utf-8")
+            _cl.write(f"\n=== launch {datetime.datetime.now().isoformat()} ===\n")
+        except Exception:
+            import io
+            _cl = io.StringIO()
+        if sys.stdout is None: sys.stdout = _cl
+        if sys.stderr is None: sys.stderr = _cl
+    print("Loading bundled protobuf..." if FROZEN
+          else "Compiling Starlink protobuf definitions...")
     try:
         ensure_proto_compiled()
         print("OK")

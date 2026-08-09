@@ -95,6 +95,36 @@ compiled automatically on first run.
 
 ---
 
+## Building a Windows executable
+
+You can ship the dashboard as a standalone `.exe` that runs on a Windows 11 machine
+with no Python install. `build_exe.py` wraps PyInstaller and handles the one wrinkle
+of freezing this app: the embedded protobuf is normally compiled at first run by
+invoking `python -m grpc_tools.protoc`, which a frozen exe cannot do. The build
+pre-compiles the schema and bundles it; the app detects it is frozen and imports the
+bundled modules instead (see the `FROZEN` branch of `ensure_proto_compiled`).
+
+```bash
+pip install pyinstaller
+python build_exe.py            # -> dist/StarlinkMonitor.exe  (single windowed exe, ~36 MB)
+python build_exe.py --console  # keep a console window for startup/debug output
+python build_exe.py --onedir   # a folder build (faster launch; no per-run unpack)
+```
+
+Notes:
+- **Writable files live next to the exe.** On first run the app creates `data/`
+  (daily CSV logs, TLE + border caches, `crash.log`) and `location.json` in the
+  same folder as `StarlinkMonitor.exe` — not in a temp dir. Put the exe somewhere
+  writable (not `C:\Program Files`).
+- **One-file vs one-dir.** The single `.exe` is simplest to hand off but unpacks to
+  `%TEMP%` on every launch, which is slow from a memory card; `--onedir` (distribute
+  the whole `dist/StarlinkMonitor/` folder, e.g. zipped) launches faster.
+- Build with the **same Python** you run the app with, so the frozen build matches
+  the tested environment. The optional `sgp4`/`numpy`/`Pillow` packages are bundled
+  automatically when present, so the satellite sky map works in the exe.
+
+---
+
 ## Requirements
 
 | Component | Notes |
