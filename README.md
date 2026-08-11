@@ -93,6 +93,10 @@ optional "likely satellite" estimate:
 No `protoc` step is needed — the protobuf schema is embedded in the script and
 compiled automatically on first run.
 
+> **Moving to a new Windows machine (Python not installed)?** Follow
+> [docs/INSTALL-Windows.md](docs/INSTALL-Windows.md) — it covers both running the
+> packaged `.exe` (no Python) and setting up from source.
+
 ---
 
 ## Building a Windows executable
