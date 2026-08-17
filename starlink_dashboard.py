@@ -24,14 +24,10 @@ DISH_HOST = "192.168.100.1:9200"
 # Firmware the protobuf field numbers were reverse-engineered/verified against.
 # On a mismatch the dashboard keeps running but flags it in the Dish Info panel,
 # since a different firmware could shift field numbers and skew readings.
-# Re-verified by full wire-decode on 2026.08.10.cr84226 (hardware hp1_proto0): the
-# field NUMBERS are unchanged and read sanely - throughput 1007/1008, latency 1009,
-# obstruction 1015, eth 1016, ready 1019, gps 1026, sector 1028, tilt 1049, router_id
-# 1040, dish_timestamp 1002, history 1001-1004; history field 1010 still ~53-112 and
-# still NOT snr. One correction from this pass: the boresight/signal elevation and
-# azimuth fields (1011/1012 and signal_stats .4/.5) are (azimuth, elevation), not the
-# reverse - see those messages. This build also adds ~20 new fields (see the note on
-# DishGetStatusResponse); unverified, so left unmapped.
+# The proto below is now transcribed from the dish's own gRPC SERVER REFLECTION on
+# this build (authoritative), not reverse-engineered - so field numbers are exact.
+# On a firmware mismatch the dashboard keeps running but flags it in the Dish Info
+# panel; if the schema ever shifts, re-dump it from reflection.
 KNOWN_FIRMWARE = "2026.08.10.cr84226"
 
 POLL_INTERVAL = 2    # seconds between live polls
@@ -91,135 +87,117 @@ service Device {
     rpc Handle(Request) returns (Response) {}
 }
 
+// ---------------------------------------------------------------------------
+// The definitions below come from the dish's own gRPC SERVER REFLECTION on
+// firmware 2026.08.10.cr84226 - the authoritative schema, not reverse-engineered
+// guesses. This corrects several fields the old wire-decode had wrong:
+// obstruction_stats was actually reading gps_stats; the "SNR" was tilt_angle_deg;
+// pop_ping_drop_rate and the ready-state bits were off; the "per-sector map" was
+// initialization_duration_seconds. Only the subset the app uses is transcribed.
+// ---------------------------------------------------------------------------
+
 message DeviceInfo {
     string id = 1;
     string hardware_version = 2;
     string software_version = 3;
     string country_code = 4;
-    bool software_partitions_equal = 8;
+    bool   software_partitions_equal = 6;
 }
 
 message DeviceState {
     uint64 uptime_s = 1;
 }
 
-message DishSignalStats {
-    uint32 index = 1;
-    float snr_db = 3;
-    // (azimuth, elevation), not (elevation, azimuth): field 4 reads ~178 deg (south),
-    // field 5 ~76 deg. See the note on boresight_* below for the evidence.
-    float azimuth_deg = 4;
-    float elevation_deg = 5;
-    uint32 rx_beam_state = 6;
-    // f7 was mapped to "obstruction_score" but it is an alignment/uncertainty
-    // metric, not an obstruction fraction: it swings (e.g. 0.62 -> 0.44 between
-    // polls) and reads high even with a verified clear sky. Kept for raw logging
-    // only; not surfaced in the UI as obstruction.
-    float align_metric = 7;
-    // Secondary beam follows the same (azimuth, elevation) ordering by convention;
-    // the two values (~68 / ~65) are too close to distinguish independently.
-    float secondary_azimuth_deg = 8;
-    float secondary_elevation_deg = 9;
-}
-
+// Real obstruction stats (status field 1004). fraction_obstructed is the 0-1
+// obstruction fraction; there is no "event count" field.
 message DishObstructionStats {
-    bool currently_obstructed = 1;
-    uint32 obstruction_duration_s = 2;
-    uint32 obstruction_event_count = 5;
+    float  fraction_obstructed = 1;
+    float  valid_s = 4;
+    bool   currently_obstructed = 5;
+    float  avg_prolonged_obstruction_duration_s = 6;
+    float  time_obstructed = 9;
+    uint32 patches_valid = 10;
 }
 
-// Per-sector (wedge) signal quality, 10 sectors
-message DishSectorSignal {
-    uint32 s1 = 1;
-    uint32 s2 = 2;
-    uint32 s3 = 3;
-    uint32 s4 = 4;
-    uint32 s5 = 5;
-    uint32 s6 = 6;
-    uint32 s7 = 7;
-    uint32 s8 = 8;
-    uint32 s9 = 9;
-    uint32 s10 = 10;
+// GPS fix status (status field 1015). No lat/lon here - position is gated behind
+// the get_location request, which returns PERMISSION_DENIED unless enabled.
+message DishGpsStats {
+    bool   gps_valid = 1;
+    uint32 gps_sats = 2;
+    bool   no_sats_after_ttff = 3;
+    bool   inhibit_gps = 4;
+    int32  pnt_filter_convergence_state = 5;   // AttitudeEstimationState enum
 }
 
-// 5 readiness flags (all 1 = fully operational)
+// Pointing / alignment (status field 1027). tilt_angle_deg is what the app used
+// to mislabel as "SNR". boresight_* here mirror the top-level 1011/1012.
+message AlignmentStats {
+    float tilt_angle_deg = 3;
+    float boresight_azimuth_deg = 4;
+    float boresight_elevation_deg = 5;
+    float attitude_uncertainty_deg = 7;
+    float desired_boresight_azimuth_deg = 8;
+    float desired_boresight_elevation_deg = 9;
+}
+
+// Subsystem bring-up flags (status field 1019). The old guessed proto had these
+// bit numbers off by one (cady was 2, should be 1, ...).
 message DishReadyStates {
-    bool cady = 2;
-    bool scp = 3;
-    bool l1l2 = 4;
-    bool xphy = 5;
-    bool aap = 6;
+    bool cady = 1;
+    bool scp  = 2;
+    bool l1l2 = 3;
+    bool xphy = 4;
+    bool aap  = 5;
+    bool rf   = 6;
 }
 
-// GPS / IMU status
-message DishGpsStatus {
-    bool valid = 1;
-    float accuracy = 2;
+// Dish orientation quaternion (status field 1049).
+message Quaternion {
+    float q_scalar = 1;
+    float q_x = 2;
+    float q_y = 3;
+    float q_z = 4;
 }
 
-// Dish orientation quaternion (x,w,y,z ordering confirmed by wire decode)
-message DishTilt {
-    float x = 1;
-    float w = 2;
-    float y = 3;
-    float z = 4;
-}
-
-// Field numbers first confirmed by raw wire-decoding on firmware 2026.05.26, and
-// re-verified unchanged on 2026.08.10.cr84226.
+// Authoritative field numbers (from dish gRPC reflection, fw 2026.08.10.cr84226).
 message DishGetStatusResponse {
-    DeviceInfo device_info = 1;
+    DeviceInfo  device_info  = 1;
     DeviceState device_state = 2;
 
-    float pop_ping_drop_rate = 1006;
+    float pop_ping_drop_rate      = 1003;
     float downlink_throughput_bps = 1007;
-    float uplink_throughput_bps = 1008;
-    float pop_ping_latency_ms = 1009;
+    float uplink_throughput_bps   = 1008;
+    float pop_ping_latency_ms     = 1009;
 
-    // Fields 1011/1012 mirror signal_stats .4/.5 and are likewise (azimuth,
-    // elevation), NOT the reverse: 1011 reads ~178 deg (due south, correct for a
-    // northern-hemisphere dish), 1012 reads ~76 deg. Confirmed by wire-decode + sky
-    // geometry on 2026.08.10.cr84226 - boresight sits ~7 deg from a real satellite
-    // only under this reading. Earlier builds had these two labels swapped, which fed
-    // a bogus 178 deg "elevation" to the display and the satellite estimator.
-    float boresight_azimuth_deg = 1011;
+    DishObstructionStats obstruction_stats = 1004;
+    DishGpsStats         gps_stats         = 1015;
+
+    // 1011 = azimuth (~178 deg, due south), 1012 = elevation (~76 deg). Confirmed by
+    // reflection and by sky geometry (boresight lands ~1 deg from a live satellite).
+    float boresight_azimuth_deg   = 1011;
     float boresight_elevation_deg = 1012;
 
-    DishObstructionStats obstruction_stats = 1015;
-    uint32 eth_speed_mbps = 1016;
+    int32 eth_speed_mbps           = 1016;
+    bool  is_snr_above_noise_floor = 1018;   // numeric SNR is deprecated; this is the flag
+    bool  is_snr_persistently_low  = 1022;
 
-    DishReadyStates ready_states = 1019;
+    DishReadyStates ready_states        = 1019;
+    AlignmentStats  alignment_stats     = 1027;
+    Quaternion      ned2dish_quaternion = 1049;
 
-    DishGpsStatus gps_status = 1026;
-    DishSignalStats signal_stats = 1027;
-    DishSectorSignal sector_signal = 1028;
-
-    DishTilt tilt_quaternion = 1049;
-
-    // Additional fields confirmed by wire-decode (fw 2026.05.26)
-    string router_id = 1040;        // e.g. "Router-01000000000000000092F196"
-    float  dish_timestamp = 1002;   // Unix timestamp from dish clock
-
-    // Fields firmware 2026.08.10.cr84226 emits that this app does not (yet) decode.
-    // Observed on the wire but their meaning is unverified, so they are left unmapped
-    // rather than guessed: 1004 (7 packed f32), 1005, 1017, 1018, 1020, 1021, 1023,
-    // 1024, 1025, 1031, 1041, 1043, 1044, 1045, 1048, 1050, 1051, 1053, 1054, 1056,
-    // 2000. proto3 ignores unknown fields, so leaving them out is safe. Identify them
-    // against ground truth before adding any (see the project's reverse-engineering
-    // method) - do not map a plausible-looking field on numbering alone.
+    repeated string connected_routers   = 1040;
 }
 
 message DishGetHistoryResponse {
     uint64 current = 1;
-    // Packed float arrays — 900 seconds of 1Hz history
-    // Field numbers confirmed by wire-decoding against firmware 2026.05.26
-    repeated float pop_ping_drop_rate = 1001 [packed=true];
-    repeated float pop_ping_latency_ms = 1002 [packed=true];
+    // Packed float arrays - 900 s of 1 Hz history.
+    repeated float pop_ping_drop_rate      = 1001 [packed=true];
+    repeated float pop_ping_latency_ms     = 1002 [packed=true];
     repeated float downlink_throughput_bps = 1003 [packed=true];
-    repeated float uplink_throughput_bps = 1004 [packed=true];
-    // NOTE: field 1010 was previously mapped to snr_db, but wire-decoding showed
-    // it ranges ~16-89 (mean ~32) and does not track the live signal_stats.snr_db
-    // (~16 dB). It is NOT SNR, so it is intentionally not parsed/seeded.
+    repeated float uplink_throughput_bps   = 1004 [packed=true];
+    // Field 1010 is power_in (watts, ~50-110), NOT snr - so it is never seeded into
+    // any SNR series.
+    repeated float power_in                = 1010 [packed=true];
 }
 
 message GetStatusRequest {}
@@ -578,8 +556,8 @@ class StatusPanel:
     def __init__(self, parent):
         self.frame = make_card(parent, "Status")
         self.rows = {}
-        for key in ["Obstr. Events", "Obstr. Map", "Ethernet",
-                    "Elevation", "Azimuth", "SNR", "Uptime", "Firmware"]:
+        for key in ["Obstructed", "Obstruction", "GPS Fix", "Ethernet",
+                    "Elevation", "Azimuth", "Signal", "Uptime", "Firmware"]:
             row = tk.Frame(self.frame, bg=CARD)
             row.pack(fill="x", padx=8, pady=1)
             tk.Label(row, text=f"{key}:", bg=CARD, fg=DIM,
@@ -666,69 +644,9 @@ def fetch_geolocation():
         return json.loads(r.read())
 
 
-class SectorChart(tk.Canvas):
-    """Ring bar chart for per-sector signal quality (10 sectors)."""
-    SIZE = 200
-
-    def __init__(self, parent):
-        super().__init__(parent, width=self.SIZE, height=self.SIZE,
-                         bg=CARD, highlightthickness=0)
-        self._draw([])
-
-    def _draw(self, values):
-        self.delete("all")
-        cx = cy = self.SIZE // 2
-        r_outer = cx - 12
-        r_inner = cx - 45
-
-        n = 10
-        gap_deg = 4
-        sector_deg = (360 / n) - gap_deg
-
-        lo, hi = 20, 50  # expected dB range for display
-
-        for i, val in enumerate(values[:n]):
-            start = 270 + i * (360 / n) - sector_deg / 2
-            frac = max(0, min(1, (val - lo) / (hi - lo)))
-            bar_r = r_inner + frac * (r_outer - r_inner)
-            color = GREEN if frac > 0.6 else (YELLOW if frac > 0.3 else RED)
-
-            # Background track
-            self.create_arc(cx - r_outer, cy - r_outer, cx + r_outer, cy + r_outer,
-                            start=start, extent=sector_deg,
-                            fill=BORDER, outline="")
-            self.create_arc(cx - r_inner, cy - r_inner, cx + r_inner, cy + r_inner,
-                            start=start, extent=sector_deg,
-                            fill=CARD, outline="")
-
-            # Value fill
-            self.create_arc(cx - bar_r, cy - bar_r, cx + bar_r, cy + bar_r,
-                            start=start, extent=sector_deg,
-                            fill=color, outline="")
-            self.create_arc(cx - r_inner, cy - r_inner, cx + r_inner, cy + r_inner,
-                            start=start, extent=sector_deg,
-                            fill=CARD, outline="")
-
-            # Sector label
-            label_r = r_outer + 10
-            angle_rad = math.radians(start + sector_deg / 2)
-            lx = cx + label_r * math.cos(angle_rad)
-            ly = cy - label_r * math.sin(angle_rad)
-            self.create_text(lx, ly, text=str(val),
-                             fill=TEXT, font=("Consolas", 7), anchor="center")
-
-        if not values:
-            self.create_text(cx, cy, text="No Data", fill=DIM, font=("Consolas", 9))
-        else:
-            self.create_text(cx, cy - 8, text="Map",
-                             fill=TEXT, font=("Consolas", 9, "bold"))
-            self.create_text(cx, cy + 8, text="per sector",
-                             fill=DIM, font=("Consolas", 8))
-
-    def update(self, sector_signal_msg):
-        vals = [getattr(sector_signal_msg, f"s{i}", 0) for i in range(1, 11)]
-        if any(v > 0 for v in vals):
-            self._draw(vals)
+# (SectorChart was removed in the reflection-based proto correction: it rendered
+#  status field 1028, which the authoritative schema shows is
+#  initialization_duration_seconds, not per-sector signal data.)
 
 
 class ReadyStatesPanel:
@@ -738,8 +656,9 @@ class ReadyStatesPanel:
         ("cady", "CADY",  "Modem (Cady ASIC)"),
         ("scp",  "SCP",   "System control proc."),
         ("l1l2", "L1/L2", "Link layers 1 & 2"),
-        ("xphy", "XPHY",  "PHY / RF subsystem"),
+        ("xphy", "XPHY",  "PHY subsystem"),
         ("aap",  "AAP",   "App / access layer"),
+        ("rf",   "RF",    "RF / transceiver"),
     ]
 
     def __init__(self, parent):
@@ -777,9 +696,9 @@ class DetailInfoPanel:
     def __init__(self, parent):
         self.frame = make_card(parent, "Extended Info")
         self.rows = {}
-        keys = ["Country", "GPS Valid", "GPS Accuracy",
-                "Sec. Elevation", "Sec. Azimuth", "Obstr. Events", "Likely Sat",
-                "Dish ID", "Router ID", "Dish Clock"]
+        keys = ["Country", "GPS Valid", "GPS Sats",
+                "Desired El", "Desired Az", "Attitude ±", "Obstruction", "Likely Sat",
+                "Dish ID", "Router"]
         for key in keys:
             row = tk.Frame(self.frame, bg=CARD)
             row.pack(fill="x", padx=8, pady=1)
@@ -804,16 +723,15 @@ class DetailInfoPanel:
 LOG_FIELDS = [
     "timestamp_utc",
     "dl_mbps", "ul_mbps", "latency_ms", "drop_pct",
-    "snr_db", "boresight_el_deg", "boresight_az_deg", "tilt_deg",
-    "obstr_events", "eth_mbps", "uptime_s",
-    "dish_gps_valid", "dish_gps_accuracy_m", "align_metric_f7",
-    "gps_lat", "gps_lon", "gps_sats", "gps_quality",
+    "obstruction_pct", "currently_obstructed",
+    "boresight_el_deg", "boresight_az_deg", "tilt_deg",
+    "snr_above_noise_floor", "eth_mbps", "uptime_s",
+    "dish_gps_valid", "dish_gps_sats", "attitude_uncertainty_deg",
+    "desired_el_deg", "desired_az_deg",
+    "gps_lat", "gps_lon", "gps_sats", "gps_quality",   # serial NMEA receiver
     "firmware", "country",
     "cum_dl_gb", "cum_ul_gb",
     "likely_sat", "likely_sat_sep_deg",
-    # Per-sector map values (field 1028) — logged to study long-term behaviour
-    "sector1", "sector2", "sector3", "sector4", "sector5",
-    "sector6", "sector7", "sector8", "sector9", "sector10",
 ]
 
 
@@ -1149,13 +1067,10 @@ class SkyMapPanel:
                        command=on_toggle, bg=CARD, fg=DIM, selectcolor=BG,
                        activebackground=CARD, activeforeground=TEXT, font=F_SMALL,
                        bd=0, highlightthickness=0, cursor="hand2").pack(side="left")
-        # Prototype: translucent per-sector obstruction overlay (coarse az-only data)
-        self.show_obstr = tk.BooleanVar(value=True)
-        tk.Checkbutton(ctl, text="Obstruction", variable=self.show_obstr,
-                       command=self._redraw, bg=CARD, fg=DIM, selectcolor=BG,
-                       activebackground=CARD, activeforeground=TEXT, font=F_SMALL,
-                       bd=0, highlightthickness=0, cursor="hand2").pack(side="left",
-                                                                        padx=(12, 0))
+        # (The old per-sector obstruction overlay was removed: it drew field 1028,
+        #  which reflection shows is initialization_duration_seconds, not sector data.
+        #  The real per-direction obstruction map is a separate get_obstruction_map call.)
+        self.show_obstr = tk.BooleanVar(value=False)
         tk.Label(ctl, textvariable=status_var, bg=CARD, fg=DIM, font=F_TINY,
                  anchor="e").pack(side="right")
         self.canvas = tk.Canvas(self.frame, bg="#0a0f16", highlightthickness=0)
@@ -1937,12 +1852,15 @@ class Dashboard:
             spark_color=PURPLE)
         self.card_ul.frame.grid(row=0, column=3, sticky="nsew", padx=4, pady=4)
 
-        # Row 1 — SNR, location (wide), status.  Dish Info now lives in the
+        # Row 1 — obstruction, location (wide), status.  Dish Info now lives in the
         # detail window, so Location spans two columns and shows full values.
-        self.card_snr = MetricCard(
-            main, "SNR", unit="dB", fmt="{:.1f}",
-            spark_color=GREEN)
-        self.card_snr.frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+        # (This card was "SNR", but that field is deprecated on the dish - the value
+        #  the app showed was actually tilt angle. fraction_obstructed is the real,
+        #  useful link-quality metric.)
+        self.card_obstr = MetricCard(
+            main, "Obstruction", unit="%", fmt="{:.2f}",
+            low_good=True, warn=0.5, crit=2.0, spark_color=GREEN)
+        self.card_obstr.frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
 
         self.location_panel = LocationPanel(main, self._open_set_location)
         self.location_panel.frame.grid(row=1, column=1, columnspan=2,
@@ -2008,24 +1926,15 @@ class Dashboard:
         self.ready_panel = ReadyStatesPanel(main)
         self.ready_panel.frame.grid(row=0, column=2, sticky="nsew", padx=4, pady=4)
 
-        # Per-sector map (field 1028 updates slowly — like the sky/obstruction map,
-        # it shifts over ~hours as the dish re-scans, not poll-to-poll)
-        sector_frame = make_card(main, "Per-Sector Map")
-        sector_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
-        tk.Label(sector_frame,
-                 text="Slowly-updating sky scan — changes over hours, not seconds",
-                 bg=CARD, fg=DIM, font=F_TINY, anchor="w",
-                 wraplength=260, justify="left").pack(fill="x", padx=8, pady=(0, 2))
-        self.sector_chart = SectorChart(sector_frame)
-        self.sector_chart.pack(expand=True)
-
-        # Dish info (moved from main window)
+        # Dish info (moved from main window). Occupies the cell the removed
+        # "Per-Sector Map" card used (field 1028 was not sector data - see proto).
         self.info_panel = InfoPanel(main)
-        self.info_panel.frame.grid(row=1, column=1, sticky="nsew", padx=4, pady=4)
+        self.info_panel.frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
 
-        # Extended info
+        # Extended info (fills the two cells right of Dish Info)
         self.detail_info = DetailInfoPanel(main)
-        self.detail_info.frame.grid(row=1, column=2, sticky="nsew", padx=4, pady=4)
+        self.detail_info.frame.grid(row=1, column=1, columnspan=2,
+                                    sticky="nsew", padx=4, pady=4)
 
     # ------------------------------------------------------------------
     def _fetch_location(self):
@@ -2140,10 +2049,8 @@ class Dashboard:
     def _seed_history(self, h):
         """Pre-populate sparklines from the dish's onboard 900-second history buffer.
 
-        Note: SNR is deliberately NOT seeded. The history array at field 1010 does
-        not match the live signal_stats.snr_db (it ranges ~16-89, mean ~32 vs a live
-        ~16 dB), so it is not the SNR metric. Rather than show wrong buffered values,
-        the SNR sparkline builds up from live polls only.
+        Only drop/latency/throughput are seeded. History field 1010 is power_in
+        (watts), not a link-quality metric, so it is not seeded into any card.
         """
         dl  = [v / 1e6 for v in h.downlink_throughput_bps]
         ul  = [v / 1e6 for v in h.uplink_throughput_bps]
@@ -2165,16 +2072,22 @@ class Dashboard:
     def _apply_status(self, s):
         dl = s.downlink_throughput_bps / 1e6
         ul = s.uplink_throughput_bps / 1e6
-        snr = s.signal_stats.snr_db
         el = s.boresight_elevation_deg
         az = s.boresight_azimuth_deg
         self._last_boresight = (el, az)   # consumed by optional TLE sat matcher
+
+        obstr = s.obstruction_stats
+        frac_obstr = obstr.fraction_obstructed * 100.0        # -> percent
+        obstructed = obstr.currently_obstructed
+        snr_ok = s.is_snr_above_noise_floor
+        gps = s.gps_stats
+
         # Main window metrics
         self.card_latency.update(s.pop_ping_latency_ms)
         self.card_drop.update(s.pop_ping_drop_rate * 100)
         self.card_dl.update(dl)
         self.card_ul.update(ul)
-        self.card_snr.update(snr if snr > 0 else None)
+        self.card_obstr.update(frac_obstr)
 
         di = s.device_info
         ds = s.device_state
@@ -2193,44 +2106,20 @@ class Dashboard:
             usage_str = f"↓{self._cum_dl_gb:.2f} ↑{self._cum_ul_gb:.2f} GB"
         self.info_panel.set("Usage", usage_str)
 
-        # currently_obstructed reflects learned sky-map state in fw 2026.05.26,
-        # not real-time signal loss — show cumulative events with age, hide if >12 h old
-        obstr_events = s.obstruction_stats.obstruction_event_count
-        if obstr_events > self._obstr_event_count:
-            self._obstr_last_event_time = time.time()
-            self._obstr_event_count = obstr_events
-        elif self._obstr_last_event_time is None and obstr_events > 0:
-            self._obstr_last_event_time = time.time()
-            self._obstr_event_count = obstr_events
-
-        age_s = (time.time() - self._obstr_last_event_time
-                 if self._obstr_last_event_time else None)
-        STALE = 43200  # 12 hours
-
-        if obstr_events == 0:
-            self.status_panel.set("Obstr. Events", "None", GREEN)
-            self.status_panel.set("Obstr. Map", "--", DIM)
-        elif age_s is not None and age_s > STALE:
-            self.status_panel.set("Obstr. Events", "None recent", GREEN)
-            self.status_panel.set("Obstr. Map", "--", DIM)
-        else:
-            if age_s is None:
-                age_str = "this session"
-            elif age_s < 60:
-                age_str = f"{int(age_s)}s ago"
-            elif age_s < 3600:
-                age_str = f"{int(age_s/60)}m ago"
-            else:
-                age_str = f"{int(age_s/3600)}h {int(age_s%3600/60)}m ago"
-            evt_color = YELLOW if obstr_events < 5 else RED
-            self.status_panel.set("Obstr. Events",
-                                  f"{obstr_events}  ({age_str})", evt_color)
-            self.status_panel.set("Obstr. Map",
-                                  f"last seen {age_str}", DIM)
+        # Status panel — real obstruction fraction, GPS fix, and signal-vs-noise-floor.
+        self.status_panel.set("Obstructed", "Yes" if obstructed else "No",
+                              RED if obstructed else GREEN)
+        ob_color = GREEN if frac_obstr < 0.5 else (YELLOW if frac_obstr < 2 else RED)
+        self.status_panel.set("Obstruction", f"{frac_obstr:.2f}%", ob_color)
+        self.status_panel.set("GPS Fix",
+                              f"{gps.gps_sats} sats" if gps.gps_valid else "no fix",
+                              GREEN if gps.gps_valid else RED)
         self.status_panel.set("Ethernet", f"{s.eth_speed_mbps} Mbps")
         self.status_panel.set("Elevation", f"{el:.1f}°")
         self.status_panel.set("Azimuth", f"{az:.1f}°")
-        self.status_panel.set("SNR", f"{snr:.1f} dB" if snr > 0 else "--")
+        self.status_panel.set("Signal",
+                              "Above noise floor" if snr_ok else "Below noise floor",
+                              GREEN if snr_ok else RED)
         self.status_panel.set("Uptime", f"{uptime_h}h {uptime_m}m")
         self.status_panel.set("Firmware", di.software_version)
 
@@ -2238,54 +2127,42 @@ class Dashboard:
         self._ul_history.append(ul)
         self._draw_history()
 
-        # Dish tilt from orientation quaternion (fields: x=1, w=2, y=3, z=4) ->
-        # shown as a value in the Dish Info panel (the gauge graphic was removed).
-        q = s.tilt_quaternion
-        w, x, y, z = q.w, q.x, q.y, q.z
+        # Dish tilt from the NED->dish orientation quaternion (q_scalar,q_x,q_y,q_z).
+        q = s.ned2dish_quaternion
+        w, x, y, z = q.q_scalar, q.q_x, q.q_y, q.q_z
+        tilt_log = ""
         if abs(w) > 0.01 or abs(x) > 0.01:
             rz = w*w - x*x - y*y + z*z
             tilt_deg = math.degrees(math.acos(max(-1.0, min(1.0, rz))))
             self.info_panel.set("Tilt", f"{tilt_deg:.1f}° from vertical")
+            tilt_log = f"{tilt_deg:.2f}"
 
-        self.sector_chart.update(s.sector_signal)
-        self.sky_map.set_sectors(
-            [getattr(s.sector_signal, f"s{i}", 0) for i in range(1, 11)])
         self.ready_panel.update(s.ready_states)
 
-        # Extended info panel
-        gps_valid = s.gps_status.valid
+        # Extended info panel — GPS fix, the dish's desired (target) boresight, and
+        # attitude uncertainty, all from the authoritative alignment_stats/gps_stats.
+        al = s.alignment_stats
         self.detail_info.set("Country", di.country_code)
-        self.detail_info.set("GPS Valid", "Yes" if gps_valid else "No",
-                             GREEN if gps_valid else RED)
-        gps_acc = s.gps_status.accuracy
-        acc_color = GREEN if gps_acc < 5 else (YELLOW if gps_acc < 20 else RED)
-        self.detail_info.set("GPS Accuracy", f"{gps_acc:.2f} m", acc_color)
-        # (Obstruction is reported via event count below; the old "Obstr. Score"
-        #  used signal_stats f7, which is an alignment metric, not obstruction.)
-        self.detail_info.set("Sec. Elevation", f"{s.signal_stats.secondary_elevation_deg:.1f}°")
-        self.detail_info.set("Sec. Azimuth",   f"{s.signal_stats.secondary_azimuth_deg:.1f}°")
-        self.detail_info.set("Obstr. Events",  s.obstruction_stats.obstruction_event_count)
+        self.detail_info.set("GPS Valid", "Yes" if gps.gps_valid else "No",
+                             GREEN if gps.gps_valid else RED)
+        self.detail_info.set("GPS Sats", gps.gps_sats)
+        self.detail_info.set("Desired El", f"{al.desired_boresight_elevation_deg:.1f}°")
+        self.detail_info.set("Desired Az", f"{al.desired_boresight_azimuth_deg:.1f}°")
+        self.detail_info.set("Attitude ±", f"{al.attitude_uncertainty_deg:.2f}°")
+        self.detail_info.set("Obstruction", f"{frac_obstr:.2f}%")
         self.detail_info.set("Dish ID", di.id)
-        if s.router_id:
-            self.detail_info.set("Router ID", s.router_id)
-        if s.dish_timestamp > 0:
-            dt = datetime.datetime.fromtimestamp(s.dish_timestamp, tz=datetime.timezone.utc)
-            self.detail_info.set("Dish Clock", dt.strftime("%Y-%m-%d %H:%M:%S UTC"))
+        routers = list(s.connected_routers)
+        if routers:
+            self.detail_info.set("Router", routers[0])
 
         self.status_bar.update(True,
             f"dl {dl:.1f} Mbps  ul {ul:.1f} Mbps  "
             f"latency {s.pop_ping_latency_ms:.0f} ms  "
             f"loss {s.pop_ping_drop_rate*100:.2f}%  "
-            f"SNR {snr:.1f} dB")
+            f"obstr {frac_obstr:.2f}%")
 
         # --- Data logging ---
-        q = s.tilt_quaternion
-        w2, x2, y2, z2 = q.w, q.x, q.y, q.z
-        tilt_log = ""
-        if abs(w2) > 0.01 or abs(x2) > 0.01:
-            rz = w2*w2 - x2*x2 - y2*y2 + z2*z2
-            tilt_log = f"{math.degrees(math.acos(max(-1.0, min(1.0, rz)))):.2f}"
-        gps = self._last_gps
+        gps_nmea = self._last_gps
         self._logger.log({
             "timestamp_utc":       datetime.datetime.now(datetime.timezone.utc)
                                    .strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -2293,28 +2170,29 @@ class Dashboard:
             "ul_mbps":             f"{ul:.3f}",
             "latency_ms":          f"{s.pop_ping_latency_ms:.1f}",
             "drop_pct":            f"{s.pop_ping_drop_rate * 100:.4f}",
-            "snr_db":              f"{snr:.2f}",
+            "obstruction_pct":     f"{frac_obstr:.4f}",
+            "currently_obstructed": 1 if obstructed else 0,
             "boresight_el_deg":    f"{el:.2f}",
             "boresight_az_deg":    f"{az:.2f}",
             "tilt_deg":            tilt_log,
-            "obstr_events":        obstr_events,
+            "snr_above_noise_floor": 1 if snr_ok else 0,
             "eth_mbps":            s.eth_speed_mbps,
             "uptime_s":            s.device_state.uptime_s,
-            "dish_gps_valid":      1 if s.gps_status.valid else 0,
-            "dish_gps_accuracy_m": f"{s.gps_status.accuracy:.2f}",
-            "align_metric_f7":     f"{s.signal_stats.align_metric:.4f}",
-            "gps_lat":             f"{gps['lat']:.6f}" if gps.get("lat") else "",
-            "gps_lon":             f"{gps['lon']:.6f}" if gps.get("lon") else "",
-            "gps_sats":            gps.get("sats", ""),
-            "gps_quality":         gps.get("quality", ""),
+            "dish_gps_valid":      1 if gps.gps_valid else 0,
+            "dish_gps_sats":       gps.gps_sats,
+            "attitude_uncertainty_deg": f"{al.attitude_uncertainty_deg:.4f}",
+            "desired_el_deg":      f"{al.desired_boresight_elevation_deg:.2f}",
+            "desired_az_deg":      f"{al.desired_boresight_azimuth_deg:.2f}",
+            "gps_lat":             f"{gps_nmea['lat']:.6f}" if gps_nmea.get("lat") else "",
+            "gps_lon":             f"{gps_nmea['lon']:.6f}" if gps_nmea.get("lon") else "",
+            "gps_sats":            gps_nmea.get("sats", ""),
+            "gps_quality":         gps_nmea.get("quality", ""),
             "firmware":            di.software_version,
             "country":             di.country_code,
             "cum_dl_gb":           f"{self._cum_dl_gb:.6f}",
             "cum_ul_gb":           f"{self._cum_ul_gb:.6f}",
             "likely_sat":          self._last_sat_name,
             "likely_sat_sep_deg":  self._last_sat_sep,
-            **{f"sector{i}": getattr(s.sector_signal, f"s{i}", "")
-               for i in range(1, 11)},
         })
 
     def _draw_history(self):

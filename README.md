@@ -6,7 +6,7 @@ login, or internet account required. Everything stays on your LAN.
 
 ![Main window](docs/screenshot-main.png)
 
-The detail window adds dish pointing, tilt, per-sector signal quality, and an
+The detail window adds dish pointing, tilt, GPS fix status, and an
 optional "likely satellite" estimate:
 
 ![Detail window](docs/screenshot-detail.png)
@@ -16,11 +16,13 @@ optional "likely satellite" estimate:
 ## Features
 
 **Main window**
-- Live metric cards with sparklines: ping latency, packet loss, download, upload, SNR
+- Live metric cards with sparklines: ping latency, packet loss, download, upload,
+  obstruction %
 - Throughput history chart (download + upload overlaid, 20-minute window)
   with a **100-sample moving-boxcar mean** for each stream
-- **Status panel:** obstruction events (with age), Ethernet speed, boresight
-  elevation/azimuth, SNR, uptime, firmware
+- **Status panel:** currently-obstructed + obstruction fraction, GPS fix (valid +
+  sat count), Ethernet speed, boresight elevation/azimuth, signal vs noise floor,
+  uptime, firmware
 - **Location panel** (two columns):
   - *Ground (IP)* — approximate ground-station/PoP location from public IP geolocation
   - *Dish (GPS)* — live dish position from an NMEA GPS receiver or manually-set coordinates
@@ -37,18 +39,14 @@ optional "likely satellite" estimate:
   highlighted with a line to the dish and its boresight offset. Fixed scale
   (~450 km left/right) with a 200 km reference ring, a boresight bearing line, and
   a north indicator. (Borders come from a one-time cached Natural Earth GeoJSON;
-  falls back to a grid if offline.) An optional **obstruction overlay** (toggle)
-  shades each azimuth sector of the dish's per-sector map as a translucent wedge in
-  the outer band (toward the horizon, where obstructions live), leaving the
-  near-overhead area clear; uses Pillow for smooth alpha, with a stippled fallback.
-- Per-sector map — 10-segment radial ring chart of the dish's per-sector sky
-  scan (field 1028); a slowly-updating map that shifts over hours, not seconds
+  falls back to a grid if offline.)
 - Ready-states indicator — each dish subsystem bring-up flag (CADY, SCP, L1/L2,
-  XPHY, AAP) shown with a status dot, a plain-language description, and a
+  XPHY, AAP, RF) shown with a status dot, a plain-language description, and a
   Ready/Down label (all green = fully operational)
 - Dish info — hardware/firmware version, uptime, cumulative session data usage,
   and dish tilt from vertical (moved here from the old gauge)
-- Extended info — country, GPS validity/accuracy, secondary beam, IDs, dish clock
+- Extended info — country, GPS fix + satellite count, the dish's desired (target)
+  boresight, attitude uncertainty, obstruction fraction, IDs, router
 - **Likely satellite estimate** — *on by default* (toggle via the checkbox in the
   Satellite Sky Map panel). Downloads the public Starlink TLE catalogue from CelesTrak,
   propagates every satellite with SGP4, and reports whichever currently sits
@@ -65,9 +63,9 @@ optional "likely satellite" estimate:
 
 **Data logging**
 - Every poll is appended to a CSV in `data/`, one file per UTC day
-  (`data/starlink_YYYY-MM-DD.csv`), covering throughput, latency, loss, SNR,
-  pointing, tilt, obstruction events, GPS, the likely-satellite match, the 10
-  per-sector map values (for long-term study), and more.
+  (`data/starlink_YYYY-MM-DD.csv`), covering throughput, latency, loss,
+  obstruction (fraction + currently-obstructed), pointing, tilt, signal vs noise
+  floor, GPS fix, desired boresight, the likely-satellite match, and more.
 
 ---
 
@@ -171,29 +169,36 @@ The selected GPS port and any manually-entered dish coordinates are saved to
 - **Transport.** The dish exposes an unauthenticated gRPC service on port 9200
   (`192.168.100.1:9200`). The client calls `Device.Handle` with `get_status` /
   `get_history` requests.
-- **Schema.** The API is undocumented. The protobuf definitions live as a
-  `PROTO_SRC` string inside `starlink_dashboard.py` and are compiled at runtime
-  with `grpcio-tools` into a temp directory — so updating a field number is a
-  one-line edit, no build step.
-- **Field numbers** were reverse-engineered by raw wire-decoding against firmware
-  **2026.05.26** and re-verified unchanged on **2026.06.15** and **2026.08.10**
-  (`cr84226`); most telemetry fields sit ≈ `+1000` from the legacy
-  community-documented spec. The 2026.08.10 build adds ~20 new fields that the app
-  leaves unmapped until their meaning is confirmed against ground truth.
-- **Verified field-mapping corrections** (from wire captures on this firmware):
-  - The history array at field `1010` is **not** SNR (it ranges ~16–89, mean ~32),
-    so the SNR sparkline is built from live polls only rather than seeded with it.
-  - `signal_stats` field 7 (once labelled "obstruction score") is an
-    alignment/uncertainty metric, not an obstruction fraction — it swings between
-    polls and reads high even with a clear sky, so it is logged raw but not shown
-    as obstruction. Obstruction is surfaced via the event count + age instead.
-  - The boresight **elevation and azimuth were swapped**: fields `1011`/`1012` (and
-    `signal_stats` .4/.5) are **(azimuth, elevation)**, not the reverse. `1011` reads
-    ~178° (due south, correct for a northern-hemisphere dish) and `1012` ~76°. Caught
-    on firmware `2026.08.10` because the "elevation" read an impossible ~178°; sky
-    geometry confirms it — with the fields read correctly, boresight sits ~1° from a
-    real Starlink satellite, versus an incoherent match when reversed. The fix also
-    corrects the "Likely satellite" estimate, which had been fed the bad elevation.
+- **Schema.** The protobuf definitions live as a `PROTO_SRC` string inside
+  `starlink_dashboard.py` and are compiled at runtime with `grpcio-tools` into a
+  temp directory — so updating a field is a one-line edit, no build step.
+- **The schema is now taken from the dish's own gRPC server reflection**
+  (firmware `2026.08.10.cr84226`), which is authoritative — not the earlier
+  reverse-engineered guesses. The dish answers `grpc.reflection`, so you can dump
+  the exact `Request`/`Response`/`DishGetStatusResponse` field numbers directly.
+  Only the subset the app uses is transcribed.
+- **Corrections the reflection dump revealed** (the old wire-decode had these
+  wrong, and several panels were showing the wrong field):
+  - `obstruction_stats` is field **1004**, not 1015 — and its real metric is
+    **`fraction_obstructed`** (0–1), not a non-existent "event count". Field **1015
+    is `gps_stats`**, which the app had been reading as obstruction.
+  - The numeric **"SNR" was `alignment_stats.tilt_angle_deg`** (dish tilt), not
+    signal-to-noise. Numeric SNR is deprecated on this firmware; the real signal
+    health is the boolean **`is_snr_above_noise_floor`** (1018). The SNR card is now
+    an **Obstruction %** metric, and the status panel shows the signal flag.
+  - `pop_ping_drop_rate` is **1003** (the app read 1006, which does not exist).
+  - `ready_states` bit numbers were **off by one** (cady is 1, not 2).
+  - Field **1028 is `initialization_duration_seconds`**, not per-sector data — so
+    the old "Per-Sector Map" card and the sky-map obstruction overlay were removed.
+  - History field **1010 is `power_in`** (watts, ~50–110), not SNR.
+  - Boresight **1011/1012 are (azimuth, elevation)** — `1011` ~178° (due south, right
+    for a northern-hemisphere dish), `1012` ~76°. Reflection confirms it, and read
+    correctly the boresight sits ~1° from a real satellite (vs. an impossible ~178°
+    "elevation" and an incoherent satellite match before). This also fixed the
+    "Likely satellite" estimate, which had been fed the bad elevation.
+- **GPS position** (lat/lon) needs the `get_location` request, which returns
+  `PERMISSION_DENIED` unless enabled on the dish. GPS **fix status** (valid, sat
+  count, filter convergence) is always available via `gps_stats`.
 - **GPS.** NMEA sentences are read on a background thread; `$xxGGA` gives fix
   quality + satellite count, `$xxRMC` gives the A/V status, and `*GSV` provides the
   in-view count. A fix auto-populates the dish coordinates.
@@ -210,17 +215,16 @@ If the orange firmware warning appears, the field numbers *may* have shifted.
 The fastest way to re-verify and adapt:
 
 1. **Trust, then verify.** Most firmware bumps don't move field numbers — first
-   just check whether the live values still look sane (throughput, SNR, pointing).
-   If they do, simply bump `KNOWN_FIRMWARE` to the new build to clear the warning.
-2. **If values look wrong, wire-decode the response.** Call `get_status`, run
-   `response.dish_get_status.SerializeToString()`, and walk the protobuf
-   wire format (field number, wire type, raw bytes) to see which field carries
-   which value — `float` fields are 32-bit (wire type 5), sub-messages are
-   length-delimited (wire type 2). This is exactly how the current mappings were
-   found; a ~40-line decoder is enough.
+   just check whether the live values still look sane (throughput, obstruction,
+   pointing). If they do, simply bump `KNOWN_FIRMWARE` to clear the warning.
+2. **If values look wrong, ask the dish for its schema.** The dish supports gRPC
+   **server reflection**, so you can dump the authoritative `Request` / `Response`
+   / `DishGetStatusResponse` definitions (with exact field numbers) using
+   `grpc_reflection` — no guessing. This is how the current `PROTO_SRC` was built.
+   (Raw wire-decoding still works as a fallback if reflection is ever disabled.)
 3. **Edit one place.** All field numbers live in the `PROTO_SRC` string near the
-   top of `starlink_dashboard.py`. Change the offending field number(s) there —
-   the proto is recompiled at runtime on next launch, so there is no build step.
+   top of `starlink_dashboard.py`. Update it from the reflection dump — the proto
+   is recompiled at runtime on next launch, so there is no build step.
 4. **Re-validate** against the dish and update `KNOWN_FIRMWARE`.
 
 ---
