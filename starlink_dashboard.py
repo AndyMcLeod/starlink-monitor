@@ -24,8 +24,14 @@ DISH_HOST = "192.168.100.1:9200"
 # Firmware the protobuf field numbers were reverse-engineered/verified against.
 # On a mismatch the dashboard keeps running but flags it in the Dish Info panel,
 # since a different firmware could shift field numbers and skew readings.
-# Field mappings confirmed unchanged on 2026.06.15.mr81291 (re-verified by wire-decode).
-KNOWN_FIRMWARE = "2026.06.15.mr81291"
+# Re-verified by full wire-decode on 2026.08.10.cr84226 (hardware hp1_proto0): every
+# field the app decodes is unchanged and reads sanely - throughput 1007/1008, latency
+# 1009, boresight 1011/1012, obstruction 1015, eth 1016, ready 1019, gps 1026,
+# signal_stats 1027 (snr=.3/el=.4/az=.5/align=.7/sec=.8,.9), sector 1028, tilt 1049,
+# router_id 1040, dish_timestamp 1002, and history 1001-1004. History field 1010 still
+# ranges ~53-112, still NOT snr. This build added ~20 new fields (see the note on
+# DishGetStatusResponse); their meaning is unverified, so they are deliberately unmapped.
+KNOWN_FIRMWARE = "2026.08.10.cr84226"
 
 POLL_INTERVAL = 2    # seconds between live polls
 HISTORY_LEN  = 600   # sparkline sample buffer; 600 pts × 2 s = 20 min
@@ -154,7 +160,8 @@ message DishTilt {
     float z = 4;
 }
 
-// Actual field numbers confirmed by raw wire-decoding against firmware 2026.05.26
+// Field numbers first confirmed by raw wire-decoding on firmware 2026.05.26, and
+// re-verified unchanged on 2026.08.10.cr84226.
 message DishGetStatusResponse {
     DeviceInfo device_info = 1;
     DeviceState device_state = 2;
@@ -181,6 +188,14 @@ message DishGetStatusResponse {
     // Additional fields confirmed by wire-decode (fw 2026.05.26)
     string router_id = 1040;        // e.g. "Router-01000000000000000092F196"
     float  dish_timestamp = 1002;   // Unix timestamp from dish clock
+
+    // Fields firmware 2026.08.10.cr84226 emits that this app does not (yet) decode.
+    // Observed on the wire but their meaning is unverified, so they are left unmapped
+    // rather than guessed: 1004 (7 packed f32), 1005, 1017, 1018, 1020, 1021, 1023,
+    // 1024, 1025, 1031, 1041, 1043, 1044, 1045, 1048, 1050, 1051, 1053, 1054, 1056,
+    // 2000. proto3 ignores unknown fields, so leaving them out is safe. Identify them
+    // against ground truth before adding any (see the project's reverse-engineering
+    // method) - do not map a plausible-looking field on numbering alone.
 }
 
 message DishGetHistoryResponse {
