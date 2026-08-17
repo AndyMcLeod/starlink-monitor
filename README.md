@@ -187,6 +187,13 @@ The selected GPS port and any manually-entered dish coordinates are saved to
     alignment/uncertainty metric, not an obstruction fraction — it swings between
     polls and reads high even with a clear sky, so it is logged raw but not shown
     as obstruction. Obstruction is surfaced via the event count + age instead.
+  - The boresight **elevation and azimuth were swapped**: fields `1011`/`1012` (and
+    `signal_stats` .4/.5) are **(azimuth, elevation)**, not the reverse. `1011` reads
+    ~178° (due south, correct for a northern-hemisphere dish) and `1012` ~76°. Caught
+    on firmware `2026.08.10` because the "elevation" read an impossible ~178°; sky
+    geometry confirms it — with the fields read correctly, boresight sits ~1° from a
+    real Starlink satellite, versus an incoherent match when reversed. The fix also
+    corrects the "Likely satellite" estimate, which had been fed the bad elevation.
 - **GPS.** NMEA sentences are read on a background thread; `$xxGGA` gives fix
   quality + satellite count, `$xxRMC` gives the A/V status, and `*GSV` provides the
   in-view count. A fix auto-populates the dish coordinates.

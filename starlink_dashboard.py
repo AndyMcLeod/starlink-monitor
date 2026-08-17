@@ -24,13 +24,14 @@ DISH_HOST = "192.168.100.1:9200"
 # Firmware the protobuf field numbers were reverse-engineered/verified against.
 # On a mismatch the dashboard keeps running but flags it in the Dish Info panel,
 # since a different firmware could shift field numbers and skew readings.
-# Re-verified by full wire-decode on 2026.08.10.cr84226 (hardware hp1_proto0): every
-# field the app decodes is unchanged and reads sanely - throughput 1007/1008, latency
-# 1009, boresight 1011/1012, obstruction 1015, eth 1016, ready 1019, gps 1026,
-# signal_stats 1027 (snr=.3/el=.4/az=.5/align=.7/sec=.8,.9), sector 1028, tilt 1049,
-# router_id 1040, dish_timestamp 1002, and history 1001-1004. History field 1010 still
-# ranges ~53-112, still NOT snr. This build added ~20 new fields (see the note on
-# DishGetStatusResponse); their meaning is unverified, so they are deliberately unmapped.
+# Re-verified by full wire-decode on 2026.08.10.cr84226 (hardware hp1_proto0): the
+# field NUMBERS are unchanged and read sanely - throughput 1007/1008, latency 1009,
+# obstruction 1015, eth 1016, ready 1019, gps 1026, sector 1028, tilt 1049, router_id
+# 1040, dish_timestamp 1002, history 1001-1004; history field 1010 still ~53-112 and
+# still NOT snr. One correction from this pass: the boresight/signal elevation and
+# azimuth fields (1011/1012 and signal_stats .4/.5) are (azimuth, elevation), not the
+# reverse - see those messages. This build also adds ~20 new fields (see the note on
+# DishGetStatusResponse); unverified, so left unmapped.
 KNOWN_FIRMWARE = "2026.08.10.cr84226"
 
 POLL_INTERVAL = 2    # seconds between live polls
@@ -105,16 +106,20 @@ message DeviceState {
 message DishSignalStats {
     uint32 index = 1;
     float snr_db = 3;
-    float elevation_deg = 4;
-    float azimuth_deg = 5;
+    // (azimuth, elevation), not (elevation, azimuth): field 4 reads ~178 deg (south),
+    // field 5 ~76 deg. See the note on boresight_* below for the evidence.
+    float azimuth_deg = 4;
+    float elevation_deg = 5;
     uint32 rx_beam_state = 6;
     // f7 was mapped to "obstruction_score" but it is an alignment/uncertainty
     // metric, not an obstruction fraction: it swings (e.g. 0.62 -> 0.44 between
     // polls) and reads high even with a verified clear sky. Kept for raw logging
     // only; not surfaced in the UI as obstruction.
     float align_metric = 7;
-    float secondary_elevation_deg = 8;
-    float secondary_azimuth_deg = 9;
+    // Secondary beam follows the same (azimuth, elevation) ordering by convention;
+    // the two values (~68 / ~65) are too close to distinguish independently.
+    float secondary_azimuth_deg = 8;
+    float secondary_elevation_deg = 9;
 }
 
 message DishObstructionStats {
@@ -171,8 +176,14 @@ message DishGetStatusResponse {
     float uplink_throughput_bps = 1008;
     float pop_ping_latency_ms = 1009;
 
-    float boresight_elevation_deg = 1011;
-    float boresight_azimuth_deg = 1012;
+    // Fields 1011/1012 mirror signal_stats .4/.5 and are likewise (azimuth,
+    // elevation), NOT the reverse: 1011 reads ~178 deg (due south, correct for a
+    // northern-hemisphere dish), 1012 reads ~76 deg. Confirmed by wire-decode + sky
+    // geometry on 2026.08.10.cr84226 - boresight sits ~7 deg from a real satellite
+    // only under this reading. Earlier builds had these two labels swapped, which fed
+    // a bogus 178 deg "elevation" to the display and the satellite estimator.
+    float boresight_azimuth_deg = 1011;
+    float boresight_elevation_deg = 1012;
 
     DishObstructionStats obstruction_stats = 1015;
     uint32 eth_speed_mbps = 1016;
